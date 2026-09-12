@@ -7,7 +7,9 @@ authors = [
     { name = "Abhigyan Dey", email = "abhigyandey2@gmail.com" }
 ]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pymupdf>=1.24",
+]
 
 [project.scripts]
 financial-rag = "financial_rag:main"
