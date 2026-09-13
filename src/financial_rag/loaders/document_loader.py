@@ -35,13 +35,22 @@ FileInput = Union[str, os.PathLike, bytes, BinaryIO]
 
 def _read_bytes(file_path_or_bytes: FileInput) -> bytes:
     """Normalize a path / bytes / file-like object into raw bytes."""
-    # TODO: handle three cases:
-    #   1. already bytes/bytearray -> return as-is (cast to bytes)
-    #   2. has a .read() method (UploadFile, Streamlit upload, open file) ->
-    #      read it, then try to .seek(0) so the caller can re-read the
-    #      stream later (wrap the seek in try/except OSError/ValueError)
-    #   3. otherwise assume it's a filesystem path -> open(..., "rb").read()
-    raise NotImplementedError
+    if isinstance(file_path_or_bytes, (bytes, bytearray)):
+        return bytes(file_path_or_bytes)
+    elif hasattr(file_path_or_bytes, "read"):
+        # file-like object (UploadFile, Streamlit upload, open file)
+        raw = file_path_or_bytes.read()
+        try:
+            file_path_or_bytes.seek(0)
+        except (OSError, ValueError):
+            # some streams don't support seek; that's fine, the caller
+            # just won't be able to re-read it later
+            pass
+        return raw
+    elif isinstance(file_path_or_bytes, (str, os.PathLike)):
+        # filesystem path
+        with open(file_path_or_bytes, "rb") as f:
+            return f.read()
 
 
 def _clean_text(text: str) -> str:
@@ -51,24 +60,27 @@ def _clean_text(text: str) -> str:
     break. Don't strip anything else -- chunking still needs real
     paragraph breaks to split on.
     """
-    # TODO: re.sub a 3+-newline run down to "\n\n", then strip leading/
-    # trailing newlines.
-    raise NotImplementedError
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def load_pdf(file_path_or_bytes: FileInput) -> list[PageText]:
     """Extract text from a PDF, one entry per page (1-indexed)."""
-    # TODO:
-    #   1. raw = _read_bytes(file_path_or_bytes)
-    #   2. try: fitz.open(stream=raw, filetype="pdf")
-    #      except Exception -> raise DocumentLoadError, chaining with `from exc`
-    #   3. loop `for page_num, page in enumerate(doc)`, call page.get_text()
-    #      (wrap in its own try/except -> DocumentLoadError naming the page)
-    #   4. append {"page_number": page_num + 1, "text": _clean_text(text)}
-    #      -- keep the entry even if text is "" (scanned/no-OCR page), so
-    #      page numbers stay aligned with the real PDF page count
-    #   5. doc.close() in a finally block
-    raise NotImplementedError
+    raw = _read_bytes(file_path_or_bytes) # read the bytes from the input (path, bytes, or file-like object)
+    pages = []
+    try:
+        doc = fitz.open(stream=raw, filetype="pdf") # open the PDF from bytes
+    except Exception as exc:
+        raise DocumentLoadError(f"Could not open PDF: {exc}") from exc
+ # raise a DocumentLoadError if the PDF cannot be opened
+    try:
+        for page_num, page in enumerate(doc): # iterate over each page in the PDF
+            try:
+                text = page.get_text() # extract text from the page
+            except Exception as exc:
+                raise DocumentLoadError(f"Failed to extract text from page {page_num + 1}") from exc # raise a DocumentLoadError if text extraction fails
+            pages.append({"page_number": page_num + 1, "text": _clean_text(text)}) # append the cleaned text and page number to the pages list
+    finally:
+        doc.close() # ensure the PDF document is closed after processing
 
 
 def load_text(file_path_or_bytes: FileInput) -> list[PageText]:
