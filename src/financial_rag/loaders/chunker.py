@@ -39,9 +39,6 @@ def _split_by_paragraphs(text: str) -> list[str]:
     Returns a list of non-empty paragraphs.
     """
     split_paragraphs = re.split(r"\n\s*\n", text)
-    for paragraph in split_paragraphs:
-        if not paragraph.strip():
-            raise ChunkingError("Empty paragraph found after splitting.")
     return [p.strip() for p in split_paragraphs if p.strip()]
 
 def _merge_chunks(
@@ -72,7 +69,7 @@ def _merge_chunks(
 
     if current_chunk:
         chunks.append(current_chunk)  # Add the last chunk if non-empty
-
+    return chunks
 
 def chunk_pages(
     pages: list[PageText], max_chunk_size: int = 1000, overlap: bool = False
@@ -94,23 +91,25 @@ def chunk_pages(
         3. Stamp each chunk with the source page_number.
         4. Assign a global chunk_index (0, 1, 2, ...).
     """
-    # TODO:
-    #   1. create an empty chunks list to hold results
-    #   2. create a global chunk_index counter (starting at 0)
-    #   3. for each page in pages:
-    #      - extract page["page_number"] and page["text"]
-    #      - call _split_by_paragraphs(text) to get paragraphs
-    #      - call _merge_chunks(paragraphs, max_chunk_size) to get merged chunks
-    #      - for each merged chunk:
-    #        * create a Chunk dict: {"page_number": ..., "text": ..., "chunk_index": ...}
-    #        * append to chunks list
-    #        * increment chunk_index
-    #   4. return chunks
-    raise NotImplementedError
+    chunks = []
+    chunk_index = 0
+    for page in pages:
+        page_number = page["page_number"]
+        text = page["text"]
+        paragraphs = _split_by_paragraphs(text)
+        merged_chunks = _merge_chunks(paragraphs, max_chunk_size)
+        for chunk_text in merged_chunks:
+            chunk = Chunk(
+                page_number=page_number,
+                text=chunk_text,
+                chunk_index=chunk_index,
+            )
+            chunks.append(chunk)
+            chunk_index += 1
+    return chunks
 
 
 def count_chunks(pages: list[PageText], max_chunk_size: int = 1000) -> int:
     """Estimate how many chunks will be produced without actually chunking."""
-    # TODO: call chunk_pages and return len(result)
-    # (This is a simple helper for progress reporting / UI.)
-    raise NotImplementedError
+    chunks = chunk_pages(pages, max_chunk_size)
+    return len(chunks)
