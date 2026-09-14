@@ -30,6 +30,7 @@ from typing import TypedDict
 import chromadb
 from chromadb.errors import ChromaError
 
+from financial_rag.config import settings
 from financial_rag.embeddings import EmbeddedChunk, get_embedding_dimensions
 
 
@@ -51,8 +52,9 @@ class StorageError(Exception):
 #   PERSIST_DIRECTORY = "./chroma_data"
 # Chroma will create/reuse this directory on disk so the index survives
 # across process restarts (no need to re-embed documents every run).
-PERSIST_DIRECTORY = "./chroma_data"
-COLLECTION_NAME = "financial_documents"
+# Configurable via PERSIST_DIRECTORY / COLLECTION_NAME in .env — see config.py.
+PERSIST_DIRECTORY = settings.persist_directory
+COLLECTION_NAME = settings.collection_name
 
 
 @lru_cache(maxsize=1)

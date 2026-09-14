@@ -21,8 +21,10 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from financial_rag.config import settings
 from financial_rag.embeddings import EmbeddingError, embed_chunks
 from financial_rag.llm import LLMError, generate_answer
 from financial_rag.loaders.chunker import chunk_pages
@@ -33,6 +35,17 @@ from financial_rag.storage import StorageError, count_stored_chunks, delete_sour
 app = FastAPI(
     title="Financial RAG",
     description="Retrieval-augmented Q&A over financial documents.",
+)
+
+# Allows a browser-based frontend (e.g. a Streamlit/React app on a
+# different origin) to call this API. Configure allowed origins via
+# CORS_ORIGINS in .env — defaults to common local dev ports.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

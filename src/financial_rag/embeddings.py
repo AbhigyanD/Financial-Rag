@@ -21,6 +21,7 @@ from typing import TypedDict
 
 from openai import OpenAI, OpenAIError
 
+from financial_rag.config import settings
 from financial_rag.loaders.chunker import Chunk
 
 
@@ -39,8 +40,9 @@ class EmbeddingError(Exception):
 
 # Model is fixed at import time: mixing vectors from two different models
 # (or dimensions) in the same index makes similarity scores meaningless.
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1536
+# Configurable via EMBEDDING_MODEL / EMBEDDING_DIMENSIONS in .env — see config.py.
+EMBEDDING_MODEL = settings.embedding_model
+EMBEDDING_DIMENSIONS = settings.embedding_dimensions
 
 
 @lru_cache(maxsize=1)
@@ -51,12 +53,10 @@ def _get_client() -> OpenAI:
     automatically). Raises EmbeddingError with a clear message if the key
     is missing rather than letting the client fail on first use.
     """
-    import os
-
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not settings.openai_api_key:
         raise EmbeddingError(
-            "OPENAI_API_KEY is not set. Export it in your environment "
-            "before calling embed_text/embed_chunks."
+            "OPENAI_API_KEY is not set. Add it to a .env file or export it "
+            "in your environment before calling embed_text/embed_chunks."
         )
     return OpenAI()
 

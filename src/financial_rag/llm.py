@@ -20,10 +20,12 @@ from typing import TypedDict
 
 import anthropic
 
+from financial_rag.config import settings
 from financial_rag.retrieval import RetrievedChunk
 
-MODEL = "claude-opus-5"
-MAX_TOKENS = 1024
+# Configurable via CLAUDE_MODEL / CLAUDE_MAX_TOKENS in .env — see config.py.
+MODEL = settings.claude_model
+MAX_TOKENS = settings.claude_max_tokens
 
 SYSTEM_PROMPT = """\
 You are a financial research assistant. Answer the user's question using \
