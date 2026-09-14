@@ -70,8 +70,7 @@ def load_pdf(file_path_or_bytes: FileInput) -> list[PageText]:
     try:
         doc = fitz.open(stream=raw, filetype="pdf") # open the PDF from bytes
     except Exception as exc:
-        raise DocumentLoadError(f"Could not open PDF: {exc}") from exc
- # raise a DocumentLoadError if the PDF cannot be opened
+        raise DocumentLoadError(f"Could not open PDF: {exc}") from exc # raise a DocumentLoadError if the PDF cannot be opened
     try:
         for page_num, page in enumerate(doc): # iterate over each page in the PDF
             try:
@@ -81,14 +80,21 @@ def load_pdf(file_path_or_bytes: FileInput) -> list[PageText]:
             pages.append({"page_number": page_num + 1, "text": _clean_text(text)}) # append the cleaned text and page number to the pages list
     finally:
         doc.close() # ensure the PDF document is closed after processing
-
+    return pages # return the list of pages with extracted text and page numbers
 
 def load_text(file_path_or_bytes: FileInput) -> list[PageText]:
     """Read a plain-text file as a single "page", for a uniform shape."""
-    # TODO: _read_bytes(...), decode as utf-8 with a latin-1 fallback
-    # (raise DocumentLoadError if both fail), return a single-item list
-    # with page_number: 1.
-    raise NotImplementedError
+    raw = _read_bytes(file_path_or_bytes)
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception as exc:
+            raise DocumentLoadError(f"Could not decode text file: {exc}") from exc
+
+    return [{"page_number": 1, "text": text}]
 
 
 def load_document(
@@ -101,26 +107,30 @@ def load_document(
     explicitly). It's optional when `file_path_or_bytes` is a path, or
     an upload object that already exposes `.filename`/`.name`.
     """
-    # TODO:
-    #   1. figure out `name`: prefer the explicit filename= arg, then
-    #      getattr(..., "filename", None), then getattr(..., "name", None),
-    #      then str(file_path_or_bytes) if it's a str/PathLike
-    #   2. if no name at all -> raise DocumentLoadError
-    #   3. ext = os.path.splitext(name)[1].lower()
-    #   4. dispatch ".pdf" -> load_pdf, ".txt" -> load_text,
-    #      else -> raise DocumentLoadError(f"Unsupported file type: {ext}")
-    raise NotImplementedError
-
+    name = filename or getattr(file_path_or_bytes, "filename", None) or getattr(file_path_or_bytes, "name", None)
+    if name is None:
+        raise DocumentLoadError("No filename provided for document; cannot determine file type.")
+    else:
+        ext = os.path.splitext(name)[1].lower()
+        if ext == ".pdf":
+            return load_pdf(file_path_or_bytes)
+        elif ext == ".txt":
+            return load_text(file_path_or_bytes)
+        else:
+            raise DocumentLoadError(f"Unsupported file type: {ext}")
 
 def get_preview(pages: list[PageText], length: int = 500) -> str:
     """Join page text (in order) until `length` chars are available."""
-    # TODO: walk pages in order, collecting page["text"] until you've
-    # gathered at least `length` chars, join with "\n\n", then slice to
-    # `length`.
-    raise NotImplementedError
+    parts: list[str] = []
+    collected_length = 0
+    for page in pages:
+        parts.append(page["text"])
+        collected_length += len(page["text"])
+        if collected_length >= length:
+            break
+    return "\n\n".join(parts)[:length]
 
 
 def get_total_length(pages: list[PageText]) -> int:
     """Total character count across all pages."""
-    # TODO: sum(len(page["text"]) for page in pages)
-    raise NotImplementedError
+    return sum(len(page["text"]) for page in pages)
