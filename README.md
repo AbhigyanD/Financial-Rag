@@ -304,3 +304,27 @@ To adjust chunking strategy, modify `chunker.py`:
 
 1. Update `_merge_chunks()` to use a different merging algorithm (e.g., sentence-aware, token-aware)
 2. Add a new parameter to `chunk_pages()` (e.g., `strategy="character"` or `strategy="token"`)
+
+## Progress Log
+
+### 2026-09-14
+
+- Implemented **Stage 3 (Embeddings)** — `embeddings.py`, using OpenAI's `text-embedding-3-small`.
+- Implemented **Stage 4 (Vector Storage)** — `storage.py`, using a local Chroma collection (cosine distance) with upsert-based ingestion and per-document deletion.
+- Implemented **Stage 5 (Retrieval)** — `retrieval.py`, gluing query embedding + vector search together and normalizing Chroma's raw distance into a `[0, 1]` similarity score.
+- Implemented **Stage 6 (LLM Response)** — `llm.py`, prompting Claude (`claude-opus-5`) to answer strictly from retrieved context with inline `[source, page N]` citations.
+- Implemented **Stage 7 (API Layer)** — `api.py`, a FastAPI app exposing document upload/delete/count and query endpoints over the full pipeline.
+- Added a `tests/` suite (pytest) covering the loader, chunker, retrieval similarity math, and LLM prompt formatting — all offline, no API keys required.
+- Fixed a stale CI workflow (wrong Python versions, missing dependency install, no tests to run) to actually use `uv sync` + `uv run pytest` against Python 3.11.
+- General repo cleanup: added `.gitignore`, removed committed `__pycache__` bytecode, removed a stray unused virtualenv, fixed the VS Code interpreter path.
+
+## AI Usage
+
+Claude (via Claude Code) was used throughout this project to:
+
+- **Structure the codebase** — proposing the module/file layout for each pipeline stage (`embeddings.py`, `storage.py`, `retrieval.py`, `llm.py`, `api.py`) consistent with the existing loader/chunker pattern.
+- **Write comments and docstrings** — explaining design decisions (e.g., why upsert instead of add, why cosine distance over Chroma's default L2, why retrieval normalizes scores before returning them).
+- **Debug issues** — catching a `return` vs `raise` bug in an exception path, a batch-accumulation bug in `embed_chunks` that silently dropped all but the last batch, a missing `return` statement, and a stale CI workflow that referenced non-existent files and Python versions.
+- **Come up with test ideas** — suggesting which pure-logic paths were safe/valuable to test without hitting paid APIs (e.g., distance-to-similarity conversion, prompt context formatting) and edge cases to cover (empty input, out-of-range values, multi-excerpt formatting).
+
+All code was reviewed before being committed; the developer made the final calls on architecture decisions (e.g., embedding provider, vector store choice, similarity score convention).
