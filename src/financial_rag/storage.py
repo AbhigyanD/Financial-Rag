@@ -68,7 +68,14 @@ def _get_collection() -> chromadb.Collection:
     """Create/return the Chroma collection used to store chunks."""
     client = _get_client()
     try:
-        return client.get_or_create_collection(name=COLLECTION_NAME)
+        # Cosine distance (not Chroma's default squared-L2) keeps scores in
+        # a predictable [0, 2] range, which retrieval.py relies on to
+        # convert distance into a [0, 1] similarity score. Only applies to
+        # a newly created collection — has no effect if one already exists
+        # on disk with a different metric.
+        return client.get_or_create_collection(
+            name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+        )
     except ChromaError as e:
         raise StorageError(f"Failed to get/create collection '{COLLECTION_NAME}': {e}") from e
 

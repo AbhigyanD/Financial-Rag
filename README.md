@@ -171,19 +171,82 @@ except DocumentLoadError as e:
     print(f"Failed to load PDF: {e}")
 ```
 
-## Next Stages (Planned)
+### Stage 3: Embeddings (`src/financial_rag/embeddings.py`)
 
-3. **Embeddings** — Convert chunk text to vectors (OpenAI, Anthropic, local model)
-4. **Vector Storage** — Store chunks + embeddings in a database (Chroma, Pinecone, etc.)
-5. **Retrieval** — Find relevant chunks for a query via similarity search
-6. **LLM Response** — Pass retrieved chunks to Claude to generate answers
-7. **API Layer** — FastAPI or Streamlit interface for document upload and querying
+**Purpose:** Convert chunk text into vector embeddings using OpenAI's `text-embedding-3-small` (1536 dimensions).
+
+**Key Functions:**
+
+- **`embed_chunks(chunks, batch_size=100) → list[EmbeddedChunk]`** — embeds a list of chunks, batched
+- **`embed_query(query) → list[float]`** — embeds a query string with the same model, for similarity comparison
+- **`get_embedding_dimensions() → int`** — returns the model's vector size (for storage schema validation)
+
+Requires `OPENAI_API_KEY` in the environment.
+
+### Stage 4: Vector Storage (`src/financial_rag/storage.py`)
+
+**Purpose:** Persist embedded chunks in a local Chroma vector database and support similarity search.
+
+**Key Functions:**
+
+- **`store_chunks(embedded_chunks, source) → int`** — upserts chunks (re-ingesting a document overwrites, doesn't duplicate)
+- **`query_chunks(query_embedding, top_k=5, source=None) → list[StoredChunk]`** — raw similarity search (Chroma cosine distance)
+- **`delete_source(source) → int`** — removes all chunks for a document
+- **`count_stored_chunks() → int`** — total indexed chunks
+
+Data persists to `./chroma_data/` (gitignored) using cosine distance.
+
+### Stage 5: Retrieval (`src/financial_rag/retrieval.py`)
+
+**Purpose:** Glue stage 3 + stage 4 together — embed a query, search the store, and return results with a normalized `similarity` score in `[0, 1]` (higher = more relevant), rather than exposing Chroma's raw distance.
+
+**Key Function:**
+
+- **`retrieve(query, top_k=5, source=None) → list[RetrievedChunk]`**
+
+### Stage 6: LLM Response (`src/financial_rag/llm.py`)
+
+**Purpose:** Build a grounded prompt from retrieved chunks and call Claude (`claude-opus-5` via the Messages API) to generate a cited answer.
+
+**Key Functions:**
+
+- **`generate_answer(query, chunks) → Answer`** — returns `{text, citations}`; the system prompt instructs Claude to answer only from the provided context, cite `[source, page N]` inline, and say so explicitly when the context is insufficient.
+- **`build_context(chunks) → str`** — formats chunks into a labeled context block
+
+Requires `ANTHROPIC_API_KEY` in the environment.
+
+### Stage 7: API Layer (`src/financial_rag/api.py`)
+
+**Purpose:** Expose the full pipeline over HTTP with FastAPI.
+
+**Endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/documents` | Upload a PDF/TXT file — runs stages 1–4 |
+| `DELETE` | `/documents/{source}` | Remove an ingested document |
+| `GET` | `/documents/count` | Total chunks indexed |
+| `POST` | `/query` | Ask a question — runs stages 5–6, returns answer + citations |
+| `GET` | `/health` | Liveness check |
+
+Run locally:
+
+```bash
+uv run uvicorn financial_rag.api:app --reload
+```
+
+Then visit `http://localhost:8000/docs` for interactive API docs (Swagger UI).
 
 ## File Structure
 
 ```
 src/financial_rag/
 ├── __init__.py
+├── api.py                 # Stage 7: FastAPI endpoints
+├── llm.py                 # Stage 6: Claude answer generation
+├── retrieval.py            # Stage 5: Query embedding + search
+├── storage.py              # Stage 4: Chroma vector store
+├── embeddings.py           # Stage 3: OpenAI embeddings
 └── loaders/
     ├── __init__.py
     ├── document_loader.py    # Stage 1: Extract text
@@ -195,19 +258,31 @@ src/financial_rag/
 ```
 Upload (PDF/TXT)
     ↓
-[Stage 1: document_loader]
-    load_document() / load_pdf() / load_text()
+[Stage 1: document_loader] load_document()
     ↓
 list[PageText] {page_number, text}
     ↓
-[Stage 2: chunker]
-    chunk_pages()
+[Stage 2: chunker] chunk_pages()
     ↓
 list[Chunk] {page_number, text, chunk_index}
     ↓
-[Stages 3+: Embeddings, Storage, Retrieval, LLM]
+[Stage 3: embeddings] embed_chunks()
+    ↓
+list[EmbeddedChunk] {..., embedding}
+    ↓
+[Stage 4: storage] store_chunks()  →  Chroma (./chroma_data/)
+
+User query
+    ↓
+[Stage 5: retrieval] retrieve()  →  embed_query() + query_chunks()
+    ↓
+list[RetrievedChunk] {..., similarity}
+    ↓
+[Stage 6: llm] generate_answer()  →  Claude (claude-opus-5)
     ↓
 Answer with citations
+    ↓
+[Stage 7: api] exposed over HTTP (FastAPI)
 ```
 
 ## Notes

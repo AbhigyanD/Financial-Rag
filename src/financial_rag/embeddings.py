@@ -143,9 +143,7 @@ def embed_query(query: str) -> list[float]:
       embedding models); if so, use the query-specific mode here.
     """
     return embed_text(query)
-
-    
-
+   
 
 def get_embedding_dimensions() -> int:
     """Return the dimensionality of vectors produced by this module.
