@@ -16,6 +16,8 @@ dependencies = [
     "uvicorn[standard]>=0.53.0",
     "python-multipart>=0.0.32",
     "python-dotenv>=1.2.3",
+    "streamlit>=1.63.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]

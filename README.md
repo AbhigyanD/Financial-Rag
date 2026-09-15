@@ -227,12 +227,25 @@ Requires `ANTHROPIC_API_KEY` in the environment.
 | `DELETE` | `/documents/{source}` | Remove an ingested document |
 | `GET` | `/documents/count` | Total chunks indexed |
 | `POST` | `/query` | Ask a question — runs stages 5–6, returns answer + citations |
+| `POST` | `/query/stream` | Same as `/query`, but streams the answer as Server-Sent Events (`citations` → `delta`* → `done`/`error`) |
 | `GET` | `/health` | Liveness check |
 
 Run locally:
 
 ```bash
 uv run uvicorn financial_rag.api:app --reload
+```
+
+### Frontend (`streamlit_app.py`)
+
+**Purpose:** A chat UI on top of the API — upload documents in the sidebar, ask questions in the main chat, see the answer stream in as it's generated with citations shown underneath.
+
+It's a pure HTTP client (talks to the FastAPI backend via `requests`), so it can run on a different machine than the API — set `API_URL` if it's not on `localhost:8000`.
+
+Run locally (with the API already running):
+
+```bash
+uv run streamlit run streamlit_app.py
 ```
 
 Then visit `http://localhost:8000/docs` for interactive API docs (Swagger UI).
@@ -317,6 +330,11 @@ To adjust chunking strategy, modify `chunker.py`:
 - Added a `tests/` suite (pytest) covering the loader, chunker, retrieval similarity math, and LLM prompt formatting — all offline, no API keys required.
 - Fixed a stale CI workflow (wrong Python versions, missing dependency install, no tests to run) to actually use `uv sync` + `uv run pytest` against Python 3.11.
 - General repo cleanup: added `.gitignore`, removed committed `__pycache__` bytecode, removed a stray unused virtualenv, fixed the VS Code interpreter path.
+- Added centralized `.env` configuration (`config.py`) for API keys, model names, storage path, and CORS origins; `.env.example` template added, `.env` gitignored.
+- Added `CORSMiddleware` to `api.py` so a browser-based frontend can call the API from a different origin.
+- Refactored `api.py`: extracted Pydantic models into `schemas.py` and the repeated exception→HTTPException mapping into a reusable `errors.py::translate_errors` context manager.
+- Added a **Streamlit frontend** (`streamlit_app.py`) — document upload, chunk-count display, per-document deletion, and a chat interface for querying, all talking to the FastAPI backend over HTTP.
+- Added **streaming answer generation**: `llm.py::generate_answer_stream()` yields text incrementally from Claude, exposed via a new `POST /query/stream` endpoint (Server-Sent Events) so the frontend can render answers token-by-token instead of waiting for the full response.
 
 ## AI Usage
 

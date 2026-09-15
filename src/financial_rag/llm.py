@@ -16,7 +16,8 @@ Design notes:
 
 from __future__ import annotations
 
-from typing import TypedDict
+from contextlib import contextmanager
+from typing import Generator, Iterator, TypedDict
 
 import anthropic
 
@@ -64,6 +65,33 @@ def _get_client() -> anthropic.Anthropic:
         raise LLMError(f"Failed to create Anthropic client: {e}") from e
 
 
+@contextmanager
+def _translate_anthropic_errors() -> Generator[None]:
+    """Convert the anthropic SDK's typed exceptions into LLMError.
+
+    Shared by generate_answer() and generate_answer_stream() so the same
+    most-specific-first exception chain isn't duplicated between the
+    non-streaming and streaming call paths.
+    """
+    try:
+        yield
+    except anthropic.BadRequestError as e:
+        raise LLMError(f"Bad request to Claude API: {e.message}") from e
+    except anthropic.AuthenticationError as e:
+        raise LLMError("Invalid or missing ANTHROPIC_API_KEY.") from e
+    except anthropic.PermissionDeniedError as e:
+        raise LLMError("API key lacks permission for this request.") from e
+    except anthropic.NotFoundError as e:
+        raise LLMError(f"Invalid model or endpoint: {MODEL}") from e
+    except anthropic.RateLimitError as e:
+        retry_after = e.response.headers.get("retry-after", "unknown")
+        raise LLMError(f"Rate limited by Claude API. Retry after {retry_after}s.") from e
+    except anthropic.APIStatusError as e:
+        raise LLMError(f"Claude API error ({e.status_code}): {e.message}") from e
+    except anthropic.APIConnectionError as e:
+        raise LLMError("Network error connecting to Claude API.") from e
+
+
 def build_context(chunks: list[RetrievedChunk]) -> str:
     """Format retrieved chunks into a labeled context block for the prompt.
 
@@ -104,28 +132,13 @@ def generate_answer(query: str, chunks: list[RetrievedChunk]) -> Answer:
     user_message = f"Context:\n\n{context}\n\nQuestion: {query}"
 
     client = _get_client()
-    try:
+    with _translate_anthropic_errors():
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
         )
-    except anthropic.BadRequestError as e:
-        raise LLMError(f"Bad request to Claude API: {e.message}") from e
-    except anthropic.AuthenticationError as e:
-        raise LLMError("Invalid or missing ANTHROPIC_API_KEY.") from e
-    except anthropic.PermissionDeniedError as e:
-        raise LLMError("API key lacks permission for this request.") from e
-    except anthropic.NotFoundError as e:
-        raise LLMError(f"Invalid model or endpoint: {MODEL}") from e
-    except anthropic.RateLimitError as e:
-        retry_after = e.response.headers.get("retry-after", "unknown")
-        raise LLMError(f"Rate limited by Claude API. Retry after {retry_after}s.") from e
-    except anthropic.APIStatusError as e:
-        raise LLMError(f"Claude API error ({e.status_code}): {e.message}") from e
-    except anthropic.APIConnectionError as e:
-        raise LLMError("Network error connecting to Claude API.") from e
 
     if response.stop_reason == "refusal":
         raise LLMError("Claude declined to answer this query.")
@@ -135,3 +148,36 @@ def generate_answer(query: str, chunks: list[RetrievedChunk]) -> Answer:
     )
 
     return Answer(text=answer_text, citations=chunks)
+
+
+def generate_answer_stream(
+    query: str, chunks: list[RetrievedChunk]
+) -> Iterator[str]:
+    """Like generate_answer(), but yields the answer text incrementally.
+
+    Yields plain text fragments as Claude generates them, for a chat UI
+    that wants to render the response token-by-token instead of waiting
+    for the full answer. Citations aren't yielded here — the caller
+    already has `chunks` (the same list passed in) to display alongside
+    the streamed text once it completes.
+
+    Raises:
+        LLMError: if the API call fails, including mid-stream (e.g. a
+            connection drop) or if Claude refuses the query.
+    """
+    context = build_context(chunks)
+    user_message = f"Context:\n\n{context}\n\nQuestion: {query}"
+
+    client = _get_client()
+    with _translate_anthropic_errors():
+        with client.messages.stream(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        ) as stream:
+            yield from stream.text_stream
+            final_message = stream.get_final_message()
+
+    if final_message.stop_reason == "refusal":
+        raise LLMError("Claude declined to answer this query.")
