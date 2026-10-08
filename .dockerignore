@@ -1,0 +1,14 @@
+.git
+.venv
+.venv-*
+.env
+**/__pycache__
+.pytest_cache
+chroma_data
+embedding_cache
+eval
+tests
+.github
+.vscode
+*.md
+!README.md
