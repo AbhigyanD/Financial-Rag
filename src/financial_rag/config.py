@@ -100,15 +100,15 @@ class Settings:
         default_factory=lambda: os.environ.get("RERANK", "false").lower() == "true"
     )
     # If no retrieved chunk reaches this similarity, generation abstains
-    # without calling the LLM (llm.retrieval_is_weak). Similarity is
-    # (1 + cosine) / 2. 0.62 was set from a measurement with the default
-    # local MiniLM model on the eval corpus: answerable questions scored
-    # 0.697-0.878, off-topic questions 0.506-0.560. On-topic questions with
-    # no answer overlapped the answerable range (0.747-0.850), so this gate
-    # only catches off-topic questions; gate 2 handles the rest. Re-measure
-    # if the embedding model or corpus changes.
+    # without calling the LLM (llm.retrieval_is_weak). It only saves a
+    # call: gate 2 (the model's own "not found" plus citation checks) still
+    # runs for anything that passes. Similarity is (1 + cosine) / 2, with
+    # local MiniLM. On the eval corpus: answerable 0.697-0.878, off-topic
+    # 0.506-0.560. In real use, one-word questions about an uploaded resume
+    # scored 0.570-0.605 and were wrongly blocked at the earlier 0.62.
+    # 0.58 is still above every off-topic score measured.
     similarity_threshold: float = field(
-        default_factory=lambda: float(os.environ.get("SIMILARITY_THRESHOLD", "0.62"))
+        default_factory=lambda: float(os.environ.get("SIMILARITY_THRESHOLD", "0.58"))
     )
 
     # --- Stage 6: LLM / prompt builder ---

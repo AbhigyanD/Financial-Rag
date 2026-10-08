@@ -94,12 +94,11 @@ function renderDocs() {
     li.className = "doc";
     li.setAttribute("aria-current", String(state.scope === doc.source));
 
-    const name = document.createElement("button");
-    name.type = "button";
+    // The name is plain text: restricting the search is an explicit action
+    // below, so it can't be switched on by an accidental click.
+    const name = document.createElement("p");
     name.className = "doc-name";
     name.append(fileLabel(doc.source));
-    name.title = state.scope === doc.source ? "Search all documents again" : "Search only this document";
-    name.addEventListener("click", () => setScope(state.scope === doc.source ? null : doc.source));
 
     const detail = document.createElement("div");
     detail.className = "doc-detail";
@@ -115,7 +114,14 @@ function renderDocs() {
     } else {
       const facts = document.createElement("span");
       facts.textContent = `${plural(doc.pages, "page")}, ${plural(doc.chunks, "passage")}`;
-      detail.append(facts, textButton("Remove", () => { state.confirming = doc.source; renderDocs(); }));
+      const scoped = state.scope === doc.source;
+      const actions = document.createElement("span");
+      actions.className = "doc-actions";
+      actions.append(
+        textButton(scoped ? "Search all" : "Search only this", () => setScope(scoped ? null : doc.source)),
+        textButton("Remove", () => { state.confirming = doc.source; renderDocs(); }),
+      );
+      detail.append(facts, actions);
     }
     li.append(name, detail);
     list.append(li);
@@ -396,6 +402,7 @@ function buildEntry(entry) {
       activateSource(Number(cite.dataset.cite), true);
       return;
     }
+    if (e.target.closest("button")) return; // other buttons in an answer act on their own
     if (state.selected !== entry) select(entry);
   });
   renderEntry(entry, node);
@@ -414,7 +421,21 @@ function renderEntry(entry, node = entry.node) {
   } else if (entry.result && entry.result.abstained) {
     answer.innerHTML = `<p class="abstain-lead"></p><p class="abstain-why"></p>`;
     answer.querySelector(".abstain-lead").textContent = entry.result.answer;
-    answer.querySelector(".abstain-why").textContent = ABSTAIN_WHY[entry.result.abstain_reason] || "";
+    const why = answer.querySelector(".abstain-why");
+    why.textContent = ABSTAIN_WHY[entry.result.abstain_reason] || "";
+    if (entry.scope) {
+      why.textContent = entry.result.abstain_reason === "weak_retrieval"
+        ? `Only ${entry.scope} was searched, and nothing in it was close enough to this question.`
+        : `Only ${entry.scope} was searched, and none of its passages answer this.`;
+      const retry = textButton("Search all documents", () => {
+        setScope(null);
+        $("question").value = entry.question;
+        ask();
+      }, "btn-retry");
+      answer.append(retry);
+    } else if (entry.result.abstain_reason === "weak_retrieval" && entry.question.split(/\s+/).length < 3) {
+      why.textContent += " Short searches match poorly; try a full question, like \u201cWhat was total revenue in 2025?\u201d";
+    }
   } else if (entry.result) {
     const ids = new Set(entry.result.citations.map((c) => c.id));
     answer.innerHTML = formatAnswer(entry.result.answer, ids);
