@@ -231,3 +231,14 @@ def test_stream_weak_retrieval_emits_only_final(groq):
     assert len(events) == 1 and events[0][0] == "final"
     assert events[0][1]["abstain_reason"] == "weak_retrieval"
     groq.chat.completions.create.assert_not_called()
+
+
+def test_unavailable_model_error_says_which_setting_to_change(groq):
+    import httpx2 as httpx
+
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    groq.chat.completions.create.side_effect = L.openai.NotFoundError(
+        "model_not_found", response=httpx.Response(404, request=request), body=None
+    )
+    with pytest.raises(LLMError, match="GROQ_MODEL"):
+        generate_answer("q", [_chunk()])

@@ -66,3 +66,16 @@ def test_no_chunks_means_every_citation_is_invalid():
     check = validate_citations("Claim [1].", [])
     assert check.invalid_ids == [1]
     assert check.citations == []
+
+
+def test_full_width_brackets_are_read_as_citations():
+    # gpt-oss on Groq cites like this.
+    check = validate_citations("Matures in March 2029【1】. Total debt【2】.", _chunks(2))
+    assert [c["id"] for c in check.citations] == [1, 2]
+    assert check.text == "Matures in March 2029[1]. Total debt[2]."
+
+
+def test_invalid_full_width_citation_is_still_stripped():
+    check = validate_citations("Claim【1】. Made up【7】.", _chunks(1))
+    assert check.invalid_ids == [7]
+    assert check.text == "Claim[1]. Made up."

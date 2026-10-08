@@ -20,6 +20,14 @@ from financial_rag.retrieval import RetrievedChunk
 _CITATION = re.compile(r"\[(\d{1,4}(?:\s*,\s*\d{1,4})*)\]")
 _CITATION_WITH_SPACE = re.compile(r"([ \t]*)" + _CITATION.pattern)
 
+# Some models write citations with full-width brackets: gpt-oss on Groq
+# answers "...in March 2029【1】." Normalize them to [n] before parsing.
+_BRACKETS = str.maketrans({"【": "[", "】": "]", "［": "[", "］": "]", "〔": "[", "〕": "]"})
+
+
+def normalize_brackets(text: str) -> str:
+    return text.translate(_BRACKETS)
+
 
 class Citation(TypedDict):
     id: int  # the [n] the model wrote
@@ -38,6 +46,7 @@ class CitationCheck:
 
 
 def extract_ids(answer: str) -> list[int]:
+    answer = normalize_brackets(answer)
     ids = []
     for match in _CITATION.finditer(answer):
         ids.extend(int(part) for part in match.group(1).split(","))
@@ -49,6 +58,7 @@ def validate_citations(answer: str, sent_chunks: list[RetrievedChunk]) -> Citati
 
     Excerpt [n] is sent_chunks[n-1] — the numbering prompt_builder used.
     """
+    answer = normalize_brackets(answer)
     valid_range = range(1, len(sent_chunks) + 1)
     invalid: list[int] = []
     cited: dict[int, Citation] = {}

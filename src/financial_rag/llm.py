@@ -185,7 +185,11 @@ def _translate_errors() -> Generator[None]:
     except (openai.AuthenticationError, anthropic.AuthenticationError) as e:
         raise LLMError(f"{name} rejected the API key. Check it in .env.") from e
     except (openai.NotFoundError, anthropic.NotFoundError) as e:
-        raise LLMError(f"Unknown model or endpoint: {MODEL}") from e
+        setting = "GROQ_MODEL" if PROVIDER == "groq" else "CLAUDE_MODEL"
+        raise LLMError(
+            f"{name} doesn't offer the model '{MODEL}' to this API key. "
+            f"Set {setting} in .env to a model your account has, then restart."
+        ) from e
     except (openai.RateLimitError, anthropic.RateLimitError) as e:
         retry_after = e.response.headers.get("retry-after", "a few")
         raise LLMError(f"Rate limited by {name}. Retry after {retry_after} seconds.") from e

@@ -116,8 +116,12 @@ class Settings:
     llm_provider: str = field(
         default_factory=lambda: os.environ.get("LLM_PROVIDER", "groq").lower()
     )
+    # openai/gpt-oss-120b: tied with qwen/qwen3.8-27b on the eval (15/15
+    # correct, 5/5 abstentions, 2/2 injections), but with no pause between
+    # questions it never failed on Groq's free tier while qwen hit 429s on
+    # 7/20. See EVAL_RESULTS.md. llama-3.3-70b-versatile wasn't available.
     groq_model: str = field(
-        default_factory=lambda: os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        default_factory=lambda: os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
     )
     claude_model: str = field(
         default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-5")
