@@ -126,15 +126,19 @@ def store_chunks(embedded_chunks: list[EmbeddedChunk], source: str) -> int:
     ]
 
     collection = _get_collection()
+    # Chroma rejects a single write above its max batch size (5461 in
+    # chromadb 1.5.9), so a large document is written in slices.
+    batch = _get_client().get_max_batch_size()
     try:
-        # upsert (not add) so re-ingesting the same document overwrites
-        # existing vectors instead of erroring or duplicating rows.
-        collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        for i in range(0, len(ids), batch):
+            # upsert (not add) so re-ingesting the same document overwrites
+            # existing vectors instead of erroring or duplicating rows.
+            collection.upsert(
+                ids=ids[i : i + batch],
+                embeddings=embeddings[i : i + batch],
+                documents=documents[i : i + batch],
+                metadatas=metadatas[i : i + batch],
+            )
     except ChromaError as e:
         raise StorageError(
             f"Failed to store {len(embedded_chunks)} chunks for '{source}': {e}"
