@@ -1,5 +1,8 @@
 """Store embedded chunks in a vector database and query them by similarity.
 
+Why: the only module that knows Chroma exists, so swapping vector stores
+means changing this file and nothing else.
+
 This is stage 4 of the ingest pipeline: given a list[EmbeddedChunk] from
 stage 3 (embeddings), persist them in a vector store so stage 5 (retrieval)
 can find the most relevant chunks for a user's query.

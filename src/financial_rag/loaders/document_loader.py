@@ -1,5 +1,8 @@
 """Load raw text out of an uploaded document, page by page.
 
+Why: page numbers are captured here, at the source, because every later
+stage needs them to cite an answer back to a page.
+
 This is stage 1 of the ingest pipeline: given a PDF or plain-text file,
 return the extracted text plus enough structure (page numbers) that
 stage 2 (chunking) can stamp each chunk with a page number for later

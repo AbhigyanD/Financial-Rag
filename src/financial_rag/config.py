@@ -1,5 +1,8 @@
 """Central configuration, loaded from environment variables (and a local .env).
 
+Why: every tunable has one place to look and one place to change, and
+secrets only ever come from the environment, never from code.
+
 Import from this module instead of calling os.environ directly elsewhere,
 so every tunable (model names, storage path, CORS origins) has one place
 to look and one place to change.

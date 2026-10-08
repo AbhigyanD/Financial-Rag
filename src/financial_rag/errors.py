@@ -1,5 +1,8 @@
 """Translate pipeline exceptions into HTTP errors for the API layer.
 
+Why: routes declare their error mapping once instead of repeating
+try/except blocks, and unmapped exceptions still surface as real bugs.
+
 Every pipeline stage raises its own exception type (DocumentLoadError,
 EmbeddingError, StorageError, RetrievalError, LLMError). Routes in api.py
 need to turn each into an appropriate HTTPException — this was previously
