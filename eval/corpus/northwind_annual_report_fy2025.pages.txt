@@ -1,0 +1,42 @@
+FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company. Created for evaluating this RAG system.
+
+Northwind Freight Holdings - Annual Report, Fiscal Year 2025
+Letter to Shareholders
+
+Fiscal year 2025, which ended June 30, 2025, was a record year for Northwind Freight Holdings. Total revenue reached $412.6 million, an increase of 8.3% from $381.0 million in fiscal 2024.
+
+Growth came from all three of our segments, led by Ground Freight. We ended the year with 2,140 employees across 31 terminals.
+
+Dana Whitfield, Chief Executive Officer
+\f
+FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company.
+
+Financial Highlights, Fiscal Year 2025
+
+Operating income was $48.9 million, an operating margin of 11.9%. Net income was $31.2 million, and diluted earnings per share were $1.47.
+
+Cash flow from operations was $63.0 million. After capital expenditures of $35.5 million, free cash flow was $27.5 million.
+\f
+FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company.
+
+Segment Results, Fiscal Year 2025
+
+Ground Freight revenue was $268.3 million. Air Cargo revenue was $96.1 million. Warehousing revenue was $48.2 million.
+
+Air Cargo margins were pressured by fuel: Air Cargo fuel costs rose 14% year over year, partly offset by surcharges.
+\f
+FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company.
+
+Capital Structure and Shareholder Returns
+
+Total debt at June 30, 2025 was $185.0 million. The company has a $150 million revolving credit facility that matures in March 2029.
+
+The board declared a quarterly dividend of $0.24 per share and authorized a share repurchase program of up to $40 million.
+\f
+FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company.
+
+Outlook for Fiscal Year 2026
+
+Management expects fiscal 2026 revenue of $435 million to $450 million. Planned capital expenditures are $36 million.
+
+Northwind plans to open two new warehouses, in Phoenix and Columbus, during fiscal 2026.
