@@ -107,7 +107,12 @@ def load_document(
     explicitly). It's optional when `file_path_or_bytes` is a path, or
     an upload object that already exposes `.filename`/`.name`.
     """
-    name = filename or getattr(file_path_or_bytes, "filename", None) or getattr(file_path_or_bytes, "name", None)
+    name = (
+        filename
+        or (os.fspath(file_path_or_bytes) if isinstance(file_path_or_bytes, (str, os.PathLike)) else None)
+        or getattr(file_path_or_bytes, "filename", None)
+        or getattr(file_path_or_bytes, "name", None)
+    )
     if name is None:
         raise DocumentLoadError("No filename provided for document; cannot determine file type.")
     else:

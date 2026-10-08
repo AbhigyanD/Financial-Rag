@@ -5,9 +5,15 @@ safe to run in CI on every push without secrets.
 """
 
 import pymupdf as fitz
+import pytest
 
 from financial_rag.loaders.chunker import chunk_pages
-from financial_rag.loaders.document_loader import load_pdf, load_text
+from financial_rag.loaders.document_loader import (
+    DocumentLoadError,
+    load_document,
+    load_pdf,
+    load_text,
+)
 
 
 def test_load_pdf_extracts_text():
@@ -22,6 +28,18 @@ def test_load_pdf_extracts_text():
     assert len(pages) == 1
     assert "Test content" in pages[0]["text"]
     assert pages[0]["page_number"] == 1
+
+
+def test_load_document_infers_type_from_a_path(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_text("Revenue grew.")
+    assert load_document(str(path))[0]["text"] == "Revenue grew."
+    assert load_document(path)[0]["text"] == "Revenue grew."
+
+
+def test_load_document_rejects_unsupported_extension():
+    with pytest.raises(DocumentLoadError, match="Unsupported"):
+        load_document(b"x", filename="sheet.xlsx")
 
 
 def test_load_text_reads_plain_file():
