@@ -22,9 +22,16 @@ Metrics (each reported only over the questions it applies to):
 
 from __future__ import annotations
 
+import re
+
 
 def _norm(text: str) -> str:
-    return text.lower().replace(",", "").replace("$", "")
+    """Lowercase; drop commas and "$"; turn narrow/no-break spaces into
+    plain ones; join digit groups split by a space ("2 140" -> "2140")
+    and a space before "%", since some models format numbers that way."""
+    text = re.sub(r"[\u00a0\u2009\u202f]", " ", text.lower()).replace(",", "").replace("$", "")
+    text = re.sub(r"(?<=\d) (?=\d{3}\b)", "", text)
+    return re.sub(r"(?<=\d) %", "%", text)  # "14 %" -> "14%"
 
 
 def score_question(q: dict, retrieved: list[dict], answer: dict) -> dict:

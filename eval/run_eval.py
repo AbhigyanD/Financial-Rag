@@ -143,7 +143,7 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def write_report(path: Path, command: str, ingest_rows, ingest_usage, rows, top_k: int) -> None:
+def write_report(path: Path, command: str, ingest_rows, ingest_usage, rows, top_k: int, pause: float) -> None:
     metrics = aggregate(rows)
     total = {"embedding": ingest_usage["tokens"]["embedding"], "llm_input": 0, "llm_output": 0}
     for r in rows:
@@ -196,7 +196,8 @@ def write_report(path: Path, command: str, ingest_rows, ingest_usage, rows, top_
         "",
         "## Latency and cost",
         "",
-        f"- Per-question end-to-end latency (retrieve + generate): "
+        f"- Per-question end-to-end latency (retrieve + generate; {pause:g}s pause between questions, "
+        f"and any time the SDK spent waiting out rate-limit retries is included): "
         + (f"median {latencies[len(latencies) // 2]:.0f} ms, max {latencies[-1]:.0f} ms" if latencies else "n/a"),
         f"- Tokens — ingest embeddings: {ingest_usage['tokens']['embedding']}; "
         f"query embeddings: {sum(r['tokens'].get('embedding', 0) for r in rows)}; "
@@ -225,6 +226,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--out", default="EVAL_RESULTS.md")
+    parser.add_argument("--pause", type=float, default=0.0,
+                        help="seconds to wait between questions (stay under free-tier rate limits)")
     args = parser.parse_args()
 
     needed = {"groq": "GROQ_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(settings.llm_provider, "")
@@ -233,16 +236,18 @@ def main() -> None:
     if missing:
         raise SystemExit(f"Missing {', '.join(missing)}. Add them to .env (see .env.example).")
 
-    command = "uv run python eval/run_eval.py" + "".join(
-        f" {a}" for a in sys.argv[1:]
-    )
+    # The exact invocation, plus any provider/model env overrides in effect.
+    overrides = [f"{k}={os.environ[k]}" for k in ("LLM_PROVIDER", "GROQ_MODEL", "EMBEDDING_PROVIDER") if k in os.environ]
+    command = " ".join(overrides + [os.path.relpath(sys.executable, ROOT), "eval/run_eval.py", *sys.argv[1:]])
     questions = [json.loads(line) for line in (EVAL / "questions.jsonl").read_text().splitlines() if line.strip()]
 
     print(f"Building corpus and ingesting into {settings.persist_directory} ...")
     ingest_rows, ingest_usage = ingest(build_corpus(EVAL / ".build"))
 
     rows = []
-    for q in questions:
+    for i, q in enumerate(questions):
+        if i and args.pause:
+            time.sleep(args.pause)
         row = run_question(q, args.top_k)
         rows.append(row)
         status = "ERROR" if row["error"] else ("abstained" if row["abstained"] else "answered")
@@ -251,7 +256,7 @@ def main() -> None:
     results_dir = EVAL / "results"
     results_dir.mkdir(exist_ok=True)
     (results_dir / "latest.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    write_report(ROOT / args.out, command, ingest_rows, ingest_usage, rows, args.top_k)
+    write_report(ROOT / args.out, command, ingest_rows, ingest_usage, rows, args.top_k, args.pause)
 
     print(f"\nWrote {args.out} and eval/results/latest.jsonl")
     for name, (n, d) in aggregate(rows).items():

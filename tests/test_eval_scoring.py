@@ -60,3 +60,13 @@ def test_aggregate_reports_counts_over_applicable_questions_only():
     assert m["retrieval hit@k"] == (1, 1)
     assert m["correct abstention (unanswerable)"] == (1, 2)
     assert m["citation validity (markers)"] == (2, 3)
+
+
+def test_correct_ignores_narrow_spaces_in_numbers():
+    s = score_question(ANSWERABLE, [], _answer("2\u202f140 staff; $48.9\u202fmillion [1]"))
+    assert s["answer_correct"] is True
+
+
+def test_correct_ignores_a_space_before_percent():
+    q = {"id": "p", "type": "answerable", "expected": [{"source": "r.pdf", "pages": [1]}], "answer_must_contain": ["14%"]}
+    assert score_question(q, [], _answer("Fuel costs rose 14\u202f% [1]"))["answer_correct"] is True
