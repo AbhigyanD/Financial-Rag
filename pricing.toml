@@ -1,0 +1,24 @@
+# ESTIMATES ONLY — used to label logged cost as an estimate, never as a bill.
+# USD per 1 million tokens, standard rates (no batch discount, no prompt caching).
+# Sources: Anthropic model pricing table (as cached 2026-10-06); OpenAI's
+# published price for text-embedding-3-small. Verify current prices before
+# quoting these numbers anywhere.
+
+[llm."claude-opus-5"]
+input_per_mtok = 5.00
+output_per_mtok = 25.00
+
+[llm."claude-opus-5-5"]
+input_per_mtok = 4.00
+output_per_mtok = 20.00
+
+[llm."claude-sonnet-5-5"]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+
+[llm."claude-haiku-5-5"]
+input_per_mtok = 0.10
+output_per_mtok = 0.50
+
+[embedding."text-embedding-3-small"]
+input_per_mtok = 0.02

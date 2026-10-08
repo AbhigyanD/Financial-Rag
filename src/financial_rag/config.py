@@ -90,8 +90,10 @@ class Settings:
     claude_model: str = field(
         default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-5")
     )
+    # On claude-opus-5 thinking is on by default and its tokens count
+    # against max_tokens, so a small cap can cut an answer off mid-way.
     claude_max_tokens: int = field(
-        default_factory=lambda: int(os.environ.get("CLAUDE_MAX_TOKENS", "1024"))
+        default_factory=lambda: int(os.environ.get("CLAUDE_MAX_TOKENS", "4096"))
     )
     # Token budget for the CONTEXT portion of the prompt (excerpts), not the
     # whole request. Chunks are dropped (lowest-similarity first) until the
@@ -103,6 +105,10 @@ class Settings:
     # --- Stage 7/8: API, logging, cost ---
     request_timeout_seconds: float = field(
         default_factory=lambda: float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "60"))
+    )
+    # Per-token prices for the logged cost ESTIMATE (see observability.py).
+    pricing_file: str = field(
+        default_factory=lambda: os.environ.get("PRICING_FILE", "pricing.toml")
     )
     # Uploads above this are rejected with 413 before any parsing or embedding.
     max_upload_mb: float = field(

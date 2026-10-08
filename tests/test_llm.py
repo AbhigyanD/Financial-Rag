@@ -118,6 +118,12 @@ def test_generate_answer_reports_real_token_usage(mock_client):
     assert answer["output_tokens"] == 9
 
 
+def test_truncated_answer_raises_instead_of_returning_half_an_answer(mock_client):
+    mock_client.messages.create.return_value = _response("Revenue was $41", stop_reason="max_tokens")
+    with pytest.raises(LLMError, match="cut off"):
+        generate_answer("q", [_chunk()])
+
+
 def test_generate_answer_raises_on_refusal(mock_client):
     mock_client.messages.create.return_value = _response("", stop_reason="refusal")
     with pytest.raises(LLMError, match="declined"):

@@ -31,6 +31,7 @@ from rank_bm25 import BM25Okapi
 
 from financial_rag.config import settings
 from financial_rag.embeddings import EmbeddingError, embed_query
+from financial_rag.observability import note, stage
 from financial_rag.storage import StorageError, get_all_chunks, query_chunks
 
 # Standard RRF constant from Cormack et al. (2009). Larger k flattens the
@@ -85,12 +86,14 @@ def _chunk_key(chunk: RetrievedChunk) -> tuple[str, int]:
 
 def _vector_search(query: str, fetch_k: int, source: str | None) -> list[RetrievedChunk]:
     try:
-        query_embedding = embed_query(query)
+        with stage("embed_query"):
+            query_embedding = embed_query(query)
     except EmbeddingError as e:
         raise RetrievalError(f"Failed to embed query: {e}") from e
 
     try:
-        results = query_chunks(query_embedding, top_k=fetch_k, source=source)
+        with stage("vector_search"):
+            results = query_chunks(query_embedding, top_k=fetch_k, source=source)
     except StorageError as e:
         raise RetrievalError(f"Failed to query vector store: {e}") from e
 
@@ -221,10 +224,19 @@ def retrieve(
     results = _vector_search(query, fetch_k, source)
 
     if settings.hybrid_retrieval:
-        keyword_results = _bm25_search(query, fetch_k, source)
+        with stage("bm25"):
+            keyword_results = _bm25_search(query, fetch_k, source)
         results = _fuse_rankings([results, keyword_results])
 
     if settings.rerank:
-        results = _lexical_rerank(query, results)
+        with stage("rerank"):
+            results = _lexical_rerank(query, results)
 
-    return results[:top_k]
+    results = results[:top_k]
+    note(
+        retrieval_mode="hybrid" if settings.hybrid_retrieval else "vector",
+        rerank=settings.rerank,
+        chunks_retrieved=len(results),
+        best_vector_similarity=round(max((r["vector_similarity"] for r in results), default=0.0), 4),
+    )
+    return results

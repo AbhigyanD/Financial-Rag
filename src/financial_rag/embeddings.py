@@ -1,5 +1,8 @@
 """Convert chunk text into vector embeddings for semantic search.
 
+Why: one module owns the embedding model, so chunks and queries are always
+embedded the same way, and the cache and batching live in one place.
+
 This is stage 3 of the ingest pipeline: given a list[Chunk] from stage 2
 (chunker), produce a vector embedding for each chunk's text. Embeddings are
 what make retrieval possible — at query time we embed the user's question
@@ -24,6 +27,7 @@ from openai import OpenAI, OpenAIError
 from financial_rag import embedding_cache
 from financial_rag.config import settings
 from financial_rag.loaders.chunker import Chunk
+from financial_rag.observability import add_tokens, note
 
 
 class EmbeddedChunk(TypedDict):
@@ -77,6 +81,7 @@ def embed_text(text: str) -> list[float]:
 
     cached = embedding_cache.get_many(EMBEDDING_MODEL, [text])
     if text in cached:
+        note(query_embedding_cached=True)
         return cached[text]
 
     client = _get_client()
@@ -85,6 +90,7 @@ def embed_text(text: str) -> list[float]:
     except OpenAIError as e:
         raise EmbeddingError(f"OpenAI embedding call failed: {e}") from e
 
+    add_tokens(embedding=response.usage.total_tokens)
     vector = response.data[0].embedding
     embedding_cache.put_many(EMBEDDING_MODEL, {text: vector})
     return vector
@@ -122,6 +128,9 @@ def embed_chunks(
     # De-duplicate: if the same text appears in multiple chunks (or more
     # than once in `texts`), only embed it once.
     to_embed = sorted({t for t in texts if t not in vectors_by_text})
+    note(chunks=len(texts), embedding_cache_hits=len(texts) - len(to_embed))
+    if not to_embed:
+        return _attach(chunks, vectors_by_text)
 
     client = _get_client()
     for i in range(0, len(to_embed), batch_size):
@@ -133,15 +142,17 @@ def embed_chunks(
                 f"OpenAI batch embedding call failed on batch {i // batch_size}: {e}"
             ) from e
 
+        add_tokens(embedding=response.usage.total_tokens)
         new_vectors = {
             text: item.embedding for text, item in zip(batch_texts, response.data)
         }
         embedding_cache.put_many(EMBEDDING_MODEL, new_vectors)
         vectors_by_text.update(new_vectors)
 
-        done = min(i + batch_size, len(to_embed))
-        print(f"Embedded {done}/{len(to_embed)} new chunks ({len(texts) - len(to_embed)} served from cache)")
+    return _attach(chunks, vectors_by_text)
 
+
+def _attach(chunks: list[Chunk], vectors_by_text: dict[str, list[float]]) -> list[EmbeddedChunk]:
     return [
         EmbeddedChunk(
             page_number=c["page_number"],

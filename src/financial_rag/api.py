@@ -10,8 +10,11 @@ Run locally:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import logging
 import re
+import time
 import uuid
 from typing import Iterator
 
@@ -27,6 +30,16 @@ from financial_rag.errors import translate_errors
 from financial_rag.llm import Answer, LLMError, generate_answer, generate_answer_stream
 from financial_rag.loaders.chunker import chunk_pages
 from financial_rag.loaders.document_loader import DocumentLoadError, load_document
+from financial_rag.observability import (
+    Trace,
+    activate,
+    add_tokens,
+    configure_logging,
+    finish,
+    log_event,
+    note,
+    stage,
+)
 from financial_rag.retrieval import RetrievalError, retrieve
 from financial_rag.schemas import (
     CountResponse,
@@ -42,6 +55,8 @@ from financial_rag.storage import (
     delete_source,
     store_chunks,
 )
+
+configure_logging()
 
 app = FastAPI(
     title="Financial RAG",
@@ -68,10 +83,33 @@ _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
+    """Assign a request ID and open the request's Trace.
+
+    Every request except /health gets one `request_complete` log line.
+    Streaming responses finish their own trace after the last event,
+    because their body runs after this middleware has returned.
+    """
     incoming = request.headers.get("x-request-id", "")
     request_id = incoming if _SAFE_REQUEST_ID.match(incoming) else uuid.uuid4().hex[:12]
     request.state.request_id = request_id
-    response = await call_next(request)
+
+    if request.url.path == "/health":
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    trace = Trace(request_id=request_id, route=f"{request.method} {request.url.path}")
+    request.state.trace = trace
+    with activate(trace):
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            log_event("unhandled_error", level=logging.ERROR, request_id=request_id, error=repr(exc))
+            finish(trace, 500, error_type=type(exc).__name__)
+            raise
+
+    if not response.headers.get("content-type", "").startswith("text/event-stream"):
+        finish(trace, response.status_code)
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -115,11 +153,14 @@ async def _with_timeout(fn, *args):
     thread can't be killed and finishes in the background. The SDK
     clients carry the same timeout, which bounds how long that lasts.
     """
+    # Copy the context explicitly so the worker thread sees this request's Trace.
+    ctx = contextvars.copy_context()
     try:
         return await asyncio.wait_for(
-            run_in_threadpool(fn, *args), timeout=settings.request_timeout_seconds
+            run_in_threadpool(ctx.run, fn, *args), timeout=settings.request_timeout_seconds
         )
     except asyncio.TimeoutError:
+        note(timed_out=True)
         raise HTTPException(504, f"Timed out after {settings.request_timeout_seconds:.0f}s.")
 
 
@@ -137,23 +178,28 @@ def _ingest(contents: bytes, filename: str) -> tuple[int, int, int]:
         (EmbeddingError, 502, "Failed to embed document"),
         (StorageError, 500, "Failed to store document"),
     ):
-        pages = load_document(contents, filename=filename)
+        with stage("load"):
+            pages = load_document(contents, filename=filename)
         empty_pages = sum(1 for p in pages if not p["text"].strip())
-        chunks = chunk_pages(
-            pages, max_chunk_size=settings.chunk_max_size, overlap=settings.chunk_overlap
-        )
+        with stage("chunk"):
+            chunks = chunk_pages(
+                pages, max_chunk_size=settings.chunk_max_size, overlap=settings.chunk_overlap
+            )
+        note(source=filename, pages=len(pages), empty_pages=empty_pages, upload_bytes=len(contents))
         if not chunks:
             raise HTTPException(
                 422,
                 f"No extractable text in '{filename}' ({len(pages)} page(s)). "
                 "It may be a scanned PDF without an OCR text layer.",
             )
-        embedded = embed_chunks(chunks)
+        with stage("embed"):
+            embedded = embed_chunks(chunks)
         # Replace, don't merge: if a re-uploaded version has fewer chunks,
         # upsert alone would leave the old version's extra chunks behind.
         # Embedding happens first so a failed embed never deletes good data.
-        delete_source(filename)
-        stored = store_chunks(embedded, source=filename)
+        with stage("store"):
+            delete_source(filename)
+            stored = store_chunks(embedded, source=filename)
     return len(pages), empty_pages, stored
 
 
@@ -203,10 +249,23 @@ def _retrieve(body: QueryRequest):
         return retrieve(body.query, top_k=body.top_k, source=body.source)
 
 
+def _record_answer(answer: Answer) -> None:
+    add_tokens(llm_input=answer["input_tokens"], llm_output=answer["output_tokens"])
+    note(
+        abstained=answer["abstained"],
+        abstain_reason=answer["abstain_reason"],
+        citations_valid=len(answer["citations"]),
+        citations_invalid=len(answer["invalid_citation_ids"]),
+    )
+
+
 def _answer(body: QueryRequest) -> Answer:
+    note(top_k=body.top_k, query_chars=len(body.query))
     chunks = _retrieve(body)
-    with translate_errors((LLMError, 502, "Answer generation failed")):
-        return generate_answer(body.query, chunks)
+    with translate_errors((LLMError, 502, "Answer generation failed")), stage("generate"):
+        answer = generate_answer(body.query, chunks)
+    _record_answer(answer)
+    return answer
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -230,17 +289,35 @@ async def query_stream(request: Request, body: QueryRequest) -> StreamingRespons
     """
     # Retrieval runs before streaming starts, so its failures are normal
     # HTTP errors rather than an error event inside a 200 response.
+    note(top_k=body.top_k, query_chars=len(body.query), streamed=True)
     chunks = await _with_timeout(_retrieve, body)
     request_id = _request_id(request)
+    trace: Trace = request.state.trace
+    # The body below runs in worker threads after the middleware returned.
+    # Each step runs inside this one captured context so pipeline code
+    # still reports into the request's Trace.
+    ctx = contextvars.copy_context()
 
     def events() -> Iterator[str]:
+        outcome = {"status": 200}
+        t0 = time.perf_counter()
+        first_token_ms = None
+        gen = generate_answer_stream(body.query, chunks)
         try:
-            for kind, payload in generate_answer_stream(body.query, chunks):
+            while (item := ctx.run(next, gen, None)) is not None:
+                kind, payload = item
                 if kind == "delta":
+                    if first_token_ms is None:
+                        first_token_ms = round((time.perf_counter() - t0) * 1000, 1)
                     yield _sse("delta", payload)
                 else:
+                    ctx.run(_record_answer, payload)
                     yield _sse("final", _to_response(payload, request_id).model_dump())
         except LLMError as e:
+            outcome = {"status": 502, "stream_error": str(e)}
             yield _sse("error", {"message": str(e), "request_id": request_id})
+        finally:
+            trace.stages_ms["generate"] = round((time.perf_counter() - t0) * 1000, 1)
+            finish(trace, outcome.pop("status"), first_token_ms=first_token_ms, **outcome)
 
     return StreamingResponse(events(), media_type="text/event-stream")

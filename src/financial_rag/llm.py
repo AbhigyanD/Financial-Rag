@@ -20,6 +20,7 @@ import anthropic
 
 from financial_rag.citations import Citation, validate_citations
 from financial_rag.config import settings
+from financial_rag.observability import note
 from financial_rag.prompt_builder import ABSTAIN_TEXT, BuiltPrompt, build_prompt
 from financial_rag.retrieval import RetrievedChunk
 
@@ -117,7 +118,23 @@ def finalize_answer(
     )
 
 
+def _check_stop(stop_reason: str | None) -> None:
+    if stop_reason == "refusal":
+        raise LLMError("Claude declined to answer this query.")
+    if stop_reason == "max_tokens":
+        # A truncated answer can end mid-figure; better no answer than half of one.
+        raise LLMError(
+            f"Answer was cut off at CLAUDE_MAX_TOKENS={MAX_TOKENS}. Raise the limit and retry."
+        )
+
+
 def _request(prompt: BuiltPrompt) -> dict:
+    note(
+        chunks_sent=len(prompt.chunks),
+        dropped_duplicates=prompt.dropped_duplicates,
+        dropped_for_budget=prompt.dropped_for_budget,
+        est_context_tokens=prompt.estimated_context_tokens,
+    )
     return {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
@@ -135,9 +152,7 @@ def generate_answer(query: str, chunks: list[RetrievedChunk]) -> Answer:
     with _translate_anthropic_errors():
         response = client.messages.create(**_request(prompt))
 
-    if response.stop_reason == "refusal":
-        raise LLMError("Claude declined to answer this query.")
-
+    _check_stop(response.stop_reason)
     text = "".join(block.text for block in response.content if block.type == "text")
     return finalize_answer(
         text, prompt, response.usage.input_tokens, response.usage.output_tokens
@@ -165,8 +180,7 @@ def generate_answer_stream(query: str, chunks: list[RetrievedChunk]) -> Iterator
                 yield ("delta", text)
             final_message = stream.get_final_message()
 
-    if final_message.stop_reason == "refusal":
-        raise LLMError("Claude declined to answer this query.")
+    _check_stop(final_message.stop_reason)
 
     yield (
         "final",
