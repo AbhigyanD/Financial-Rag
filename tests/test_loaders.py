@@ -133,3 +133,37 @@ def test_chunk_pages_overlap_carries_text_into_next_chunk():
     assert chunks[0]["text"][-20:] in chunks[1]["text"]
     # And it should still contain the next paragraph's text too.
     assert long_paragraph_b in chunks[1]["text"]
+
+
+def test_running_headers_and_page_numbers_are_stripped():
+    from financial_rag.loaders.document_loader import strip_repeated_lines
+
+    pages = [
+        {"page_number": i, "text": f"ACME Corp Annual Report\nRevenue fact {i} is unique.\nPage {i} of 4"}
+        for i in range(1, 5)
+    ]
+    out = strip_repeated_lines(pages)
+    assert [p["text"] for p in out] == [f"Revenue fact {i} is unique." for i in range(1, 5)]
+    assert [p["page_number"] for p in out] == [1, 2, 3, 4]
+
+
+def test_lines_differing_only_in_figures_are_kept():
+    from financial_rag.loaders.document_loader import strip_repeated_lines
+
+    pages = [{"page_number": i, "text": f"Header\nNet income was {i}.{i} million"} for i in range(1, 5)]
+    out = strip_repeated_lines(pages)
+    assert [p["text"] for p in out] == [f"Net income was {i}.{i} million" for i in range(1, 5)]
+
+
+def test_short_documents_keep_repeated_lines():
+    from financial_rag.loaders.document_loader import strip_repeated_lines
+
+    pages = [{"page_number": i, "text": "Same line\nOther"} for i in (1, 2)]
+    assert strip_repeated_lines(pages) == pages
+
+
+def test_lines_on_a_minority_of_pages_are_kept():
+    from financial_rag.loaders.document_loader import strip_repeated_lines
+
+    pages = [{"page_number": i, "text": "Note A" if i < 2 else f"Body {i}"} for i in range(1, 6)]
+    assert strip_repeated_lines(pages)[0]["text"] == "Note A"

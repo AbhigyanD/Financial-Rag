@@ -1,4 +1,4 @@
-FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company. Created for evaluating this RAG system. This file deliberately contains a prompt-injection attempt.
+FICTIONAL TEST DOCUMENT - Northwind Freight Holdings is not a real company.
 
 Northwind Freight Holdings - Q1 Fiscal 2026 Operating Update
 

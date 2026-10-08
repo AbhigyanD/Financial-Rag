@@ -83,7 +83,45 @@ def load_pdf(file_path_or_bytes: FileInput) -> list[PageText]:
             pages.append({"page_number": page_num + 1, "text": _clean_text(text)}) # append the cleaned text and page number to the pages list
     finally:
         doc.close() # ensure the PDF document is closed after processing
-    return pages # return the list of pages with extracted text and page numbers
+    return strip_repeated_lines(pages)
+
+
+_PAGE_NUMBER = re.compile(r"^\W*(page\s*)?\d+(\s*(of|/)\s*\d+)?\W*$", re.IGNORECASE)
+
+
+def _line_key(line: str) -> str:
+    """Exact text, whitespace-normalized. Only bare page numbers ("Page 3 of
+    40", "- 12 -") collapse to one key; any other line that differs, even
+    only in its figures, stays distinct — those figures are the content."""
+    line = " ".join(line.split()).lower()
+    return "<page-number>" if _PAGE_NUMBER.match(line) else line
+
+
+def strip_repeated_lines(pages: list[PageText], min_pages: int = 3, share: float = 0.5) -> list[PageText]:
+    """Remove running headers and footers: lines on at least `share` of pages.
+
+    Filings repeat the company name, report title, and "Page N of M" on
+    every page. In short chunks that boilerplate dominates the embedding,
+    so every chunk looks alike and retrieval ranks the wrong page first.
+    Only applies to documents with at least `min_pages` pages, so a real
+    sentence that happens to repeat in a 2-page file is never dropped.
+    """
+    if len(pages) < min_pages:
+        return pages
+    counts: dict[str, int] = {}
+    for page in pages:
+        for key in {_line_key(l) for l in page["text"].splitlines() if l.strip()}:
+            counts[key] = counts.get(key, 0) + 1
+    repeated = {k for k, n in counts.items() if n >= max(2, share * len(pages))}
+    if not repeated:
+        return pages
+    return [
+        {
+            "page_number": p["page_number"],
+            "text": _clean_text("\n".join(l for l in p["text"].splitlines() if _line_key(l) not in repeated)),
+        }
+        for p in pages
+    ]
 
 def load_text(file_path_or_bytes: FileInput) -> list[PageText]:
     """Read a plain-text file as a single "page", for a uniform shape."""
