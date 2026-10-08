@@ -2,7 +2,7 @@
 
 What the code does today, module by module. Every claim here is about code in this repo; anything not built is listed under **WOULD-ADD**, never described as if it exists. The original audit this replaces (before the Step 1 rework) is in git history at commit `ad64610`.
 
-Checked against: 134 tests passing (`.venv/bin/python -m pytest -q`); the Docker stack run locally (`docker compose up`); real ingest and retrieval with the local embedding model; and the web UI driven in headless Chrome. **Not yet checked:** answer generation against Groq. No valid key was available, so answer quality is unmeasured; see [Evaluation status](#evaluation-status).
+Checked against: 134 tests passing (`.venv/bin/python -m pytest -q`); the Docker stack run locally (`docker compose up`); real ingest and retrieval with the local embedding model; and the web UI driven in headless Chrome. Answer generation was checked against Groq with the 20-question eval; see [Evaluation status](#evaluation-status).
 
 ## Request flow
 
@@ -23,7 +23,7 @@ Web page (web/, served at /)   ── HTTP only ──►  FastAPI (api.py)
 | 4 | Store | `storage.py` | Chroma `PersistentClient`, cosine distance. The id is `source::chunk_index`; metadata is file, page and chunk index. The collection name includes the embedding model, so switching models starts a fresh index. Writes are batched below Chroma's max batch size (5461 in chromadb 1.5.9). |
 | 5 | Retrieval | `retrieval.py` | Vector top-k by default. `HYBRID_RETRIEVAL=true` adds BM25 (`rank_bm25`) over all stored chunks, merged with reciprocal rank fusion (k=60). `RERANK=true` applies a **naive lexical-overlap** reorder, not a trained reranker. Both are off by default. |
 | 6 | Prompt builder | `prompt_builder.py` | Drops exact duplicate excerpts (ignoring case and whitespace). Trims to `CONTEXT_TOKEN_BUDGET`, estimated at chars/4 rather than with a real tokenizer. Wraps excerpts in `<documents><document id="n" source page>` tags, escapes those tags if they appear inside document text or the question, and tells the model excerpts are untrusted data, not instructions. |
-| 7 | Generation | `llm.py` | Groq `llama-3.3-70b-versatile` by default (OpenAI-compatible API via the `openai` SDK, temperature 0); Claude with `LLM_PROVIDER=anthropic`. **Gate 1:** if no chunk's cosine similarity reaches `SIMILARITY_THRESHOLD`, it abstains without calling the model. **Gate 2:** after the call, it abstains if the model says "Not found in the provided documents." or cites nothing valid. A `max_tokens` cut-off or a refusal is an error, never a partial answer. |
+| 7 | Generation | `llm.py` | Groq `openai/gpt-oss-120b` by default (chosen over `qwen/qwen3.8-27b` in EVAL_RESULTS.md) (OpenAI-compatible API via the `openai` SDK, temperature 0); Claude with `LLM_PROVIDER=anthropic`. **Gate 1:** if no chunk's cosine similarity reaches `SIMILARITY_THRESHOLD`, it abstains without calling the model. **Gate 2:** after the call, it abstains if the model says "Not found in the provided documents." or cites nothing valid. A `max_tokens` cut-off or a refusal is an error, never a partial answer. |
 | 8 | Citations | `citations.py` | Parses `[n]` markers. A marker is valid only if `n` is an excerpt id actually sent in this prompt. Invalid ids are removed from the text and reported in `invalid_citation_ids`. |
 | 9 | API | `api.py`, `schemas.py`, `errors.py` | `GET /health`, `POST /ingest`, `POST /query`, `POST /query/stream` (SSE), `DELETE /documents/{source}`, `GET /documents/count`. Request IDs (`X-Request-ID`, echoed if safe), one JSON error shape, a timeout returning 504, an upload limit returning 413, a 422 when no text was extracted, and input bounds (query 1–2000 chars, `top_k` 1–20). |
 | 10 | UI | `web/` (index.html, app.css, app.js) | Plain HTML/JS served by the API, no build step. Upload or load sample filings, ask, and read answers with clickable `[n]` citations that open the source passage, with the quoted figures highlighted. Shows abstentions with their reason, removed citations, timing, and request IDs. Model and document text is escaped before rendering. `streamlit_app.py` is the older client and still works. |
@@ -48,9 +48,9 @@ All settings come from environment variables (or `.env`) via `config.py`; `.env.
 
 ## Evaluation status
 
-`eval/run_eval.py` is built, its scoring is unit-tested, and its corpus builds and chunks correctly (5-page PDF → 5 chunks, plus two single-chunk `.txt` files). **The full run, with answers, hasn't happened** (no valid Groq key yet), so there's no `EVAL_RESULTS.md` and no answer-quality numbers.
+Real run on 2026-10-08 (`.venv/bin/python eval/run_eval.py --pause 10`, Groq `openai/gpt-oss-120b`, local MiniLM, top_k 5): **15/15 correct, 5/5 correct abstentions, 2/2 injections resisted, 15/15 valid citations, 0 errors**. Median latency was 657 ms per question. All five abstentions came from the model, not the threshold. Full report, model comparison and limits: [EVAL_RESULTS.md](EVAL_RESULTS.md).
 
-What *has* been measured, retrieval only, with local MiniLM, top_k 5, on 2026-10-08:
+Retrieval measurements behind the threshold:
 
 - **Retrieval hit@5: 15/15** for answerable and injection questions. This is weak evidence: the corpus has only 7 passages, so a top-5 search can barely miss. Before the header-stripping fix, the revenue question's answer page ranked 6th of 7.
 - **Best similarity per question:** answerable 0.697–0.878; on-topic but unanswerable 0.747–0.850; off-topic 0.506–0.560. These numbers set the 0.62 threshold.

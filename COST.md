@@ -7,7 +7,7 @@ Where the money goes, how it's measured, and which levers exist. Prices come fro
 | Stage | Default provider | Cost |
 |---|---|---|
 | Embeddings (ingest and every query) | all-MiniLM-L6-v2, **local** CPU via fastembed | $0 per token. Costs CPU time and a one-time ~90 MB model download (baked into the Docker image). |
-| Answers | Groq `llama-3.3-70b-versatile` | $0 on Groq's free tier, which is **rate-limited**. Paid-tier prices couldn't be verified (Groq's pricing page showed none when fetched), so `pricing.toml` has no Groq entry and logs record LLM cost as `null` (unknown), not $0. |
+| Answers | Groq `openai/gpt-oss-120b` | $0 on Groq's free tier, which is **rate-limited**. Paid-tier prices couldn't be verified (Groq's pricing page showed none when fetched), so `pricing.toml` has no Groq entry and logs record LLM cost as `null` (unknown), not $0. |
 
 So the real limits on the default setup are throughput and latency, not money: Groq's free-tier rate limits (a 429 becomes a clear "Rate limited by Groq. Retry after N seconds." error), and local embedding speed on the host CPU.
 
@@ -43,7 +43,18 @@ From running `prompt_builder.build_prompt` over the eval corpus, with characters
 | Eval corpus | 7 chunks, 3,029 chars (≈757 est. tokens) | chunker over `eval/corpus`, before header stripping |
 | One top-5 prompt | 765 + 2,481 chars (≈811 est. input tokens) | `build_prompt(question, 5 chunks)` |
 
-Real per-query token counts come from the first `eval/run_eval.py` run with a Groq key (EVAL_RESULTS.md, "Latency and cost").
+## Measured
+
+From the real eval run (EVAL_RESULTS.md), 20 questions on Groq `openai/gpt-oss-120b`, token counts from the API `usage` fields:
+
+| Quantity | Value |
+|---|---|
+| LLM input tokens | 16,413 total, ≈821 per question |
+| LLM output tokens | 2,048 total, ≈102 per question (includes gpt-oss's hidden reasoning tokens) |
+| Embedding tokens billed | 0 (local model) |
+| Estimated cost | Unknown: Groq has no entry in pricing.toml. $0 on the free tier |
+
+The ≈821 input tokens per question match the offline estimate (≈811) closely. For comparison, `qwen/qwen3.8-27b` used 370 output tokens for the same 20 questions, since it doesn't reason first.
 
 ## Levers
 
@@ -54,6 +65,6 @@ Real per-query token counts come from the first `eval/run_eval.py` run with a Gr
 | Embedding cache | Implemented | Unchanged chunks and repeat questions are never re-embedded |
 | Batching (100 texts per call) | Implemented | Fewer calls, same tokens: saves latency and rate limit, not money |
 | Fewer or smaller chunks (`top_k`, `CONTEXT_TOKEN_BUDGET`, `CHUNK_MAX_SIZE`) | Configurable | Smaller prompts; check retrieval hit@k in the eval when changing |
-| Smaller model (`GROQ_MODEL=llama-3.1-8b-instant`) | Configurable | Faster and higher free-tier limits; citation-following must be re-checked with the eval |
+| Different Groq model (`GROQ_MODEL=qwen/qwen3.8-27b`) | Configurable, measured | Same eval scores, about 5× fewer output tokens and lower median latency, but stricter free-tier rate limits (7/20 failed without pacing) |
 | Lower effort (Claude only) | **Not implemented** | Fewer thinking tokens on `claude-opus-5` |
 | Prompt caching or Batch API | **Not implemented** | The system prompt is ~191 est. tokens, likely too short to cache; Batch API only suits offline jobs like the eval |

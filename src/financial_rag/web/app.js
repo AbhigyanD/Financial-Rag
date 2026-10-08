@@ -372,7 +372,9 @@ function formatAnswer(text, validIds) {
           .map((id) => `<button type="button" class="cite" data-cite="${id}" aria-label="Show source ${id}">${id}</button>`)
           .join(""));
 
-  return text.trim().split(/\n\s*\n/).map((block) => {
+  // Some models put narrow no-break spaces in figures ("$150\u202fmillion"),
+  // which look cramped in Literata; use a regular no-break space instead.
+  return text.replace(/\u202f/g, "\u00a0").trim().split(/\n\s*\n/).map((block) => {
     const lines = block.split("\n");
     if (lines.every((l) => /^\s*[-*]\s+/.test(l))) {
       return `<ul>${lines.map((l) => `<li>${inline(l.replace(/^\s*[-*]\s+/, ""))}</li>`).join("")}</ul>`;

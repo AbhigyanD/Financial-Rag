@@ -2,7 +2,7 @@
 
 Question answering over uploaded financial documents (PDF or TXT) that cites every claim to a file and page, or answers "Not found in the provided documents." A citation is shown only if it points at a chunk that was actually retrieved and sent to the model.
 
-FastAPI backend with a plain HTML/JS demo page, Chroma vector store, local embeddings (all-MiniLM-L6-v2 via fastembed), and Groq (llama-3.3-70b-versatile) for answers. Claude and OpenAI embeddings remain available behind config flags. No RAG framework: each stage is a small module with its own tests.
+FastAPI backend with a plain HTML/JS demo page, Chroma vector store, local embeddings (all-MiniLM-L6-v2 via fastembed), and Groq (`openai/gpt-oss-120b`) for answers. Claude and OpenAI embeddings remain available behind config flags. No RAG framework: each stage is a small module with its own tests.
 
 | Doc | What's in it |
 |---|---|
@@ -10,7 +10,7 @@ FastAPI backend with a plain HTML/JS demo page, Chroma vector store, local embed
 | [INTERVIEW_WALKTHROUGH.md](INTERVIEW_WALKTHROUGH.md) | Request trace, difficulties hit, edge cases, trade-offs, security, scaling, hard questions |
 | [COST.md](COST.md) | Where the money goes, how it's logged, levers |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Local Docker (verified), Cloud Run plan (not deployed), hosting comparison |
-| EVAL_RESULTS.md | Written by `eval/run_eval.py`. **Not generated yet**: needs a Groq key |
+| [EVAL_RESULTS.md](EVAL_RESULTS.md) | Real 20-question run on Groq, a two-model comparison, and what the numbers do and don't show |
 
 ## Run the demo
 
@@ -39,7 +39,7 @@ The older Streamlit client still works: `uv run streamlit run streamlit_app.py` 
 
 ```bash
 uv run pytest                       # offline: every LLM client is faked; 134 tests
-uv run python eval/run_eval.py      # REAL model calls on Groq; writes EVAL_RESULTS.md
+uv run python eval/run_eval.py --pause 10   # REAL model calls on Groq; writes EVAL_RESULTS.md
 ```
 
 ## API
@@ -64,7 +64,7 @@ All settings are environment variables; `.env.example` lists each one with its d
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` / `GROQ_MODEL` | groq / llama-3.3-70b-versatile | `anthropic` switches to Claude (`CLAUDE_MODEL`) |
+| `LLM_PROVIDER` / `GROQ_MODEL` | groq / openai/gpt-oss-120b | `anthropic` switches to Claude (`CLAUDE_MODEL`) |
 | `EMBEDDING_PROVIDER` | local | `openai` switches to text-embedding-3-small |
 | `CHUNK_MAX_SIZE` / `CHUNK_OVERLAP` | 1000 / 100 | Characters, not tokens |
 | `HYBRID_RETRIEVAL` | false | Add BM25 + reciprocal rank fusion |
@@ -97,7 +97,7 @@ tests/                        offline test suite
 
 ## Status
 
-Built and tested offline. The containers run locally, and ingest plus retrieval have been run for real with the local model. **Answer generation has not run against Groq yet**: no valid key was available, so there are no measured answer-quality or latency numbers. See INTERVIEW_WALKTHROUGH.md for exactly what is and isn't verified.
+Run end to end for real on 2026-10-08: the 20-question eval on Groq scored 15/15 correct, 5/5 correct abstentions, 2/2 injections resisted, 15/15 valid citations, 0 errors (median 657 ms per question). The demo page was driven in headless Chrome against the live model. The eval corpus is tiny and fictional, so read EVAL_RESULTS.md's limits section before quoting these numbers.
 
 ## AI usage
 

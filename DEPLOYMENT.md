@@ -24,7 +24,7 @@ What was actually run and observed on 2026-10-08, with no LLM key set:
 ```text
 $ docker compose up -d   -> api: healthy, ui: healthy   (Docker HEALTHCHECK on /health and /_stcore/health)
 $ curl localhost:8000/info
-{"llm_provider":"groq","llm_model":"llama-3.3-70b-versatile","llm_key_configured":false,
+{"llm_provider":"groq","llm_model":"llama-3.3-70b-versatile","llm_key_configured":false,   (default model has since changed to openai/gpt-oss-120b)
  "embedding_provider":"local","embedding_model":"sentence-transformers/all-MiniLM-L6-v2",...}
 $ curl -o /dev/null -w "%{http_code}" localhost:8000/       -> 200   (the demo page)
 $ curl -F file=@src/financial_rag/web/samples/northwind_annual_report_fy2025.pdf localhost:8000/ingest
