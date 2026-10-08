@@ -1,8 +1,7 @@
 """Streamlit frontend for the Financial RAG API.
 
-Talks to the FastAPI backend (financial_rag.api) over HTTP — it does not
-import the pipeline directly, so this file is a pure client and can be
-deployed/run separately from the API.
+Why: a thin client — it only calls the HTTP API (never imports the
+pipeline), so it can be deployed and scaled separately from the backend.
 
 Run the backend first, then this app:
     uv run uvicorn financial_rag.api:app --reload
@@ -14,8 +13,10 @@ not running on the default localhost:8000.
 
 from __future__ import annotations
 
+import html
 import json
 import os
+from urllib.parse import quote
 
 import requests
 import streamlit as st
@@ -169,18 +170,55 @@ def _stream_query(query: str, top_k: int, source: str | None):
                 yield event_name, data
 
 
+ABSTAIN_REASONS = {
+    "weak_retrieval": "No uploaded passage was close enough to the question to answer from.",
+    "model_found_no_support": "The model read the closest passages and found no answer in them.",
+    "no_valid_citations": "The model's answer couldn't be traced to any retrieved passage, so it was withheld.",
+}
+
+
+def _error_message(e: requests.RequestException) -> str:
+    """Pull the API's {"error": {"message", "request_id"}} out of a failed call."""
+    response = getattr(e, "response", None)
+    if response is None:
+        return f"Couldn't reach the API at {API_URL}."
+    try:
+        err = response.json()["error"]
+        return f"{err['message']} (request {err['request_id']})"
+    except (ValueError, KeyError, TypeError):
+        return f"HTTP {response.status_code}: {response.text[:200]}"
+
+
 def _render_citations(citations: list[dict]) -> None:
-    with st.expander(f"{len(citations)} source excerpt(s)"):
-        for c in citations:
-            st.markdown(
-                f'<div class="citation">'
-                f'<span class="tag">{c["source"]}</span>'
-                f'<span class="tag">page {c["page_number"]}</span>'
-                f'<span class="tag">similarity {c["similarity"]:.2f}</span>'
-                f'<div class="citation-text">{c["text"]}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+    # Document text is untrusted: escape it before it goes into raw HTML,
+    # or a PDF containing markup would render (or run) in the page.
+    st.markdown("**Sources**")
+    for c in citations:
+        st.markdown(
+            f'<div class="citation">'
+            f'<span class="tag">[{c["id"]}]</span>'
+            f'<span class="tag">{html.escape(c["source"])}</span>'
+            f'<span class="tag">page {c["page_number"]}</span>'
+            f'<span class="tag">similarity {c["similarity"]:.2f}</span>'
+            f'<div class="citation-text">{html.escape(c["text"])}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _render_answer(message: dict) -> None:
+    if message.get("error"):
+        st.error(message["error"])
+        return
+    if message.get("abstained"):
+        st.info(f"**Not found in the provided documents.**  \n{ABSTAIN_REASONS.get(message.get('abstain_reason'), '')}")
+        return
+    st.markdown(message["content"])
+    if message.get("invalid_citation_ids"):
+        ids = ", ".join(f"[{i}]" for i in message["invalid_citation_ids"])
+        st.caption(f"Removed citation(s) {ids}: they pointed at no retrieved passage.")
+    if message.get("citations"):
+        _render_citations(message["citations"])
 
 
 # --- Sidebar: document upload + index status -----------------------------
@@ -195,7 +233,7 @@ with st.sidebar:
         with st.spinner(f"Processing {uploaded_file.name}"):
             try:
                 response = requests.post(
-                    f"{API_URL}/documents",
+                    f"{API_URL}/ingest",
                     files={"file": (uploaded_file.name, uploaded_file.getvalue())},
                     timeout=300,
                 )
@@ -205,9 +243,13 @@ with st.sidebar:
                     f"{result['source']} — {result['pages']} pages, "
                     f"{result['chunks_stored']} chunks stored."
                 )
+                if result["empty_pages"]:
+                    st.warning(
+                        f"{result['empty_pages']} page(s) had no extractable text "
+                        "(likely scanned images) and can't be searched."
+                    )
             except requests.RequestException as e:
-                detail = getattr(e.response, "text", str(e)) if hasattr(e, "response") else str(e)
-                st.error(f"Ingestion failed: {detail}")
+                st.error(f"Ingestion failed: {_error_message(e)}")
 
     st.divider()
 
@@ -230,12 +272,14 @@ with st.sidebar:
         delete_source_name = st.text_input("Filename to remove", key="delete_source_input")
         if st.button("Confirm delete", use_container_width=True) and delete_source_name:
             try:
-                response = requests.delete(f"{API_URL}/documents/{delete_source_name}", timeout=30)
+                response = requests.delete(
+                    f"{API_URL}/documents/{quote(delete_source_name, safe='')}", timeout=30
+                )
                 response.raise_for_status()
                 result = response.json()
                 st.success(f"Deleted {result['chunks_deleted']} chunks for {result['source']}.")
             except requests.RequestException as e:
-                st.error(f"Delete failed: {e}")
+                st.error(f"Delete failed: {_error_message(e)}")
 
 
 # --- Main: chat interface -------------------------------------------------
@@ -243,52 +287,52 @@ with st.sidebar:
 st.markdown('<div class="app-title">Financial RAG</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="app-subtitle">Ask questions grounded in the documents you\'ve uploaded. '
-    "Every answer is cited to a source and page.</div>",
+    "Answers cite numbered passages; uncited answers are withheld.</div>",
     unsafe_allow_html=True,
 )
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # list of {"role": ..., "content": ..., "citations": [...]}
+    st.session_state.messages = []
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"], avatar=None):
-        st.markdown(message["content"])
-        if message.get("citations"):
-            _render_citations(message["citations"])
+        if message["role"] == "user":
+            st.markdown(message["content"])
+        else:
+            _render_answer(message)
 
 if user_query := st.chat_input("Ask a question about your documents"):
-    st.session_state.messages.append({"role": "user", "content": user_query, "citations": None})
+    st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user", avatar=None):
         st.markdown(user_query)
 
     with st.chat_message("assistant", avatar=None):
         placeholder = st.empty()
-        answer_text = ""
-        citations: list[dict] = []
-        error_text: str | None = None
+        streamed = ""
+        message: dict = {"role": "assistant", "content": ""}
 
         try:
             for event, data in _stream_query(user_query, top_k, source_filter or None):
-                if event == "citations":
-                    citations = data
-                elif event == "delta":
-                    answer_text += data
-                    placeholder.markdown(answer_text + "▌")
+                if event == "delta":
+                    streamed += data
+                    placeholder.markdown(streamed + "▌")
+                elif event == "final":
+                    # The final event is the validated answer: it replaces
+                    # the raw streamed text (invalid citations removed, or
+                    # an abstention instead).
+                    message.update(
+                        content=data["answer"],
+                        abstained=data["abstained"],
+                        abstain_reason=data["abstain_reason"],
+                        citations=data["citations"],
+                        invalid_citation_ids=data["invalid_citation_ids"],
+                    )
                 elif event == "error":
-                    error_text = data
-                elif event == "done":
-                    break
+                    message["error"] = f"{data['message']} (request {data['request_id']})"
         except requests.RequestException as e:
-            error_text = f"Couldn't reach the API: {e}"
+            message["error"] = _error_message(e)
 
-        if error_text:
-            placeholder.error(error_text)
-            answer_text = f"_Error: {error_text}_"
-        else:
-            placeholder.markdown(answer_text)
-            if citations:
-                _render_citations(citations)
+        placeholder.empty()
+        _render_answer(message)
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": answer_text, "citations": citations}
-    )
+    st.session_state.messages.append(message)
