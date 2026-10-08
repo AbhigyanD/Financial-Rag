@@ -18,11 +18,16 @@ COPY streamlit_app.py pricing.toml ./
 COPY .streamlit ./.streamlit
 RUN uv sync --frozen --no-dev
 
+# Bake the local embedding model (~90 MB) into the image so containers
+# start without downloading it and can run with no internet access.
+ENV MODEL_CACHE_DIR=/app/model_cache
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', cache_dir='/app/model_cache')"
+
 # Writable state lives under /data so a volume can be mounted there.
 # Secrets are NOT baked in: they arrive as env vars at run time.
 ENV PERSIST_DIRECTORY=/data/chroma \
     EMBEDDING_CACHE_DIR=/data/embedding_cache
-RUN useradd --create-home --uid 10001 app && mkdir -p /data && chown app /data
+RUN useradd --create-home --uid 10001 app && mkdir -p /data && chown -R app /data /app/model_cache
 USER app
 
 EXPOSE 8000

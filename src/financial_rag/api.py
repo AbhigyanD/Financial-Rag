@@ -16,13 +16,15 @@ import logging
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Iterator
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from financial_rag.config import settings
 from financial_rag.embeddings import EmbeddingError, embed_chunks
@@ -43,6 +45,8 @@ from financial_rag.observability import (
 from financial_rag.retrieval import RetrievalError, retrieve
 from financial_rag.schemas import (
     CountResponse,
+    DocumentInfo,
+    InfoResponse,
     DeleteResponse,
     ErrorResponse,
     IngestResponse,
@@ -53,6 +57,7 @@ from financial_rag.storage import (
     StorageError,
     count_stored_chunks,
     delete_source,
+    list_sources,
     store_chunks,
 )
 
@@ -93,7 +98,7 @@ async def request_id_middleware(request: Request, call_next):
     request_id = incoming if _SAFE_REQUEST_ID.match(incoming) else uuid.uuid4().hex[:12]
     request.state.request_id = request_id
 
-    if request.url.path == "/health":
+    if request.url.path == "/health" or request.url.path == "/" or request.url.path.startswith("/static/"):
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
@@ -167,9 +172,41 @@ async def _with_timeout(fn, *args):
 # --- routes ------------------------------------------------------------------
 
 
+WEB_DIR = Path(__file__).parent / "web"
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def web_app() -> FileResponse:
+    """The demo web UI (plain HTML/CSS/JS in financial_rag/web/)."""
+    return FileResponse(WEB_DIR / "index.html")
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/info", response_model=InfoResponse)
+def info() -> InfoResponse:
+    """Which models are in use, and whether the LLM key is set (never the key itself)."""
+    key = settings.anthropic_api_key if settings.llm_provider == "anthropic" else settings.groq_api_key
+    return InfoResponse(
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
+        llm_key_configured=bool(key and key.strip()),
+        embedding_provider=settings.embedding_provider,
+        embedding_model=settings.embedding_model,
+        hybrid_retrieval=settings.hybrid_retrieval,
+        rerank=settings.rerank,
+    )
+
+
+@app.get("/documents", response_model=list[DocumentInfo])
+def documents() -> list[DocumentInfo]:
+    """Every stored document with its passage count and page count."""
+    with translate_errors((StorageError, 500, "Failed to list documents")):
+        return [DocumentInfo(**row) for row in list_sources()]
 
 
 def _ingest(contents: bytes, filename: str) -> tuple[int, int, int]:

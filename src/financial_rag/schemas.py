@@ -24,6 +24,22 @@ class DeleteResponse(BaseModel):
     chunks_deleted: int
 
 
+class DocumentInfo(BaseModel):
+    source: str
+    chunks: int
+    pages: int  # highest page number stored (scanned pages with no text aren't counted)
+
+
+class InfoResponse(BaseModel):
+    llm_provider: str
+    llm_model: str
+    llm_key_configured: bool
+    embedding_provider: str
+    embedding_model: str
+    hybrid_retrieval: bool
+    rerank: bool
+
+
 class CountResponse(BaseModel):
     total_chunks: int
 

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Financial RAG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,500;7..72,600&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand">
+      <h1>Financial RAG</h1>
+      <p>Ask questions about your filings. Every answer points to the page it came from.</p>
+    </div>
+    <p class="engine" id="engine" aria-live="polite"></p>
+  </header>
+
+  <div class="notice" id="notice" role="alert" hidden></div>
+
+  <main class="desk">
+    <aside class="library" id="library" aria-labelledby="library-title">
+      <div class="library-head">
+        <h2 id="library-title">Documents</h2>
+        <span class="count" id="doc-count"></span>
+      </div>
+
+      <ul class="doc-list" id="doc-list"></ul>
+
+      <div class="drop" id="drop">
+        <input type="file" id="file-input" accept=".pdf,.txt" multiple hidden>
+        <button type="button" class="btn btn-quiet" id="add-file">Add PDF or text file</button>
+        <p class="drop-hint">or drop files here</p>
+      </div>
+      <ul class="uploads" id="uploads" aria-live="polite"></ul>
+
+      <div class="sample" id="sample">
+        <button type="button" class="btn btn-link" id="load-sample">Load the sample filings</button>
+        <p>Three short documents from Northwind Freight, a fictional company made for testing. Two of them hide instructions aimed at the model.</p>
+      </div>
+    </aside>
+
+    <section class="inquiry" aria-labelledby="ask-label">
+      <form class="ask" id="ask-form">
+        <label for="question" id="ask-label" class="visually-hidden">Question</label>
+        <textarea id="question" rows="2" maxlength="2000" placeholder="What was operating income in fiscal 2025?" autocomplete="off"></textarea>
+        <div class="ask-row">
+          <span class="scope" id="scope" hidden></span>
+          <button type="submit" class="btn btn-primary" id="ask-btn">Ask</button>
+        </div>
+      </form>
+
+      <div class="try" id="try" hidden>
+        <p>Try one:</p>
+        <ul id="try-list"></ul>
+      </div>
+
+      <ol class="log" id="log" reversed aria-live="polite"></ol>
+
+      <div class="empty" id="empty">
+        <p class="empty-lead">Nothing to search yet.</p>
+        <p>Add a filing on the left, or load the sample filings, then ask a question. If the answer isn't in your documents, you'll be told so instead of getting a guess.</p>
+      </div>
+    </section>
+
+    <aside class="evidence" aria-labelledby="evidence-title">
+      <h2 id="evidence-title">Evidence</h2>
+      <p class="evidence-for" id="evidence-for">Sources for the selected answer appear here.</p>
+      <ol class="sources" id="sources"></ol>
+    </aside>
+  </main>
+
+  <template id="entry-tpl">
+    <li class="entry">
+      <p class="entry-q"></p>
+      <div class="entry-a"></div>
+      <p class="entry-meta"></p>
+    </li>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

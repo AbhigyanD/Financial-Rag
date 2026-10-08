@@ -1,9 +1,10 @@
-# Local run: API on :8000, UI on :8501.
-#   cp .env.example .env   # add OPENAI_API_KEY and ANTHROPIC_API_KEY
+# Local run: demo web UI + API on :8000; the older Streamlit UI on :8501.
+#   cp .env.example .env   # add GROQ_API_KEY
 #   docker compose up --build
 services:
   api:
     build: .
+    image: financial-rag
     env_file:
       - path: .env
         required: false # health check and UI still start without keys; queries will fail clearly
@@ -13,7 +14,7 @@ services:
       - rag-data:/data # vector store + embedding cache survive container restarts
 
   ui:
-    build: .
+    image: financial-rag # same image as api, different command
     command: ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
     environment:
       API_URL: http://api:8000
