@@ -2,7 +2,7 @@
 
 Question answering over uploaded financial documents (PDF or TXT) that cites every claim to a file and page, or answers "Not found in the provided documents." A citation is shown only if it points at a chunk that was actually retrieved and sent to the model.
 
-FastAPI backend, Streamlit thin client, Chroma vector store, OpenAI embeddings, Claude for generation. No RAG framework: each stage is a small module with its own tests.
+FastAPI backend with a plain HTML/JS demo page, Chroma vector store, local embeddings (all-MiniLM-L6-v2 via fastembed), and Groq (llama-3.3-70b-versatile) for answers. Claude and OpenAI embeddings remain available behind config flags. No RAG framework: each stage is a small module with its own tests.
 
 | Doc | What's in it |
 |---|---|
@@ -10,41 +10,47 @@ FastAPI backend, Streamlit thin client, Chroma vector store, OpenAI embeddings, 
 | [INTERVIEW_WALKTHROUGH.md](INTERVIEW_WALKTHROUGH.md) | Request trace, difficulties hit, edge cases, trade-offs, security, scaling, hard questions |
 | [COST.md](COST.md) | Where the money goes, how it's logged, levers |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Local Docker (verified), Cloud Run plan (not deployed), hosting comparison |
-| EVAL_RESULTS.md | Written by `eval/run_eval.py`. **Not generated yet**: needs API keys |
+| EVAL_RESULTS.md | Written by `eval/run_eval.py`. **Not generated yet**: needs a Groq key |
 
-## Run it
+## Run the demo
 
 ```bash
-cp .env.example .env        # set OPENAI_API_KEY and ANTHROPIC_API_KEY
+cp .env.example .env        # paste your GROQ_API_KEY (free at console.groq.com)
 ```
 
 With Docker:
 
 ```bash
-docker compose up --build   # API http://localhost:8000 (docs at /docs), UI http://localhost:8501
+docker compose up --build   # open http://localhost:8000
 ```
 
 Without Docker, using [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync
-uv run uvicorn financial_rag.api:app --reload      # terminal 1
-uv run streamlit run streamlit_app.py              # terminal 2
+uv run uvicorn financial_rag.api:app --reload      # open http://localhost:8000
 ```
+
+In the page, click **Load the sample filings** (three short documents for a fictional company, two of which contain prompt-injection text), then try the suggested questions. The first ingest downloads the embedding model once (~90 MB) unless you're using the Docker image, which already contains it.
+
+The older Streamlit client still works: `uv run streamlit run streamlit_app.py` (port 8501).
 
 ## Test and evaluate
 
 ```bash
-uv run pytest                       # offline: AI APIs are mocked; 121 tests
-uv run python eval/run_eval.py      # REAL API calls, costs money; writes EVAL_RESULTS.md
+uv run pytest                       # offline: every LLM client is faked; 134 tests
+uv run python eval/run_eval.py      # REAL model calls on Groq; writes EVAL_RESULTS.md
 ```
 
 ## API
 
 | Method | Path | Does |
 |---|---|---|
+| `GET` | `/` | The demo web page |
 | `GET` | `/health` | Liveness |
+| `GET` | `/info` | Models in use, and whether the LLM key is set (never the key) |
 | `POST` | `/ingest` | Upload a PDF/TXT (multipart `file`): load, chunk, embed, store. 413 over `MAX_UPLOAD_MB`; 422 if no text could be extracted |
+| `GET` | `/documents` | Stored documents with page and passage counts |
 | `POST` | `/query` | `{"query", "top_k"?, "source"?}` returns `{answer, abstained, abstain_reason, citations[], invalid_citation_ids[], request_id}` |
 | `POST` | `/query/stream` | Same, as Server-Sent Events: `delta`* then `final` (the validated response), or `error` |
 | `DELETE` | `/documents/{source}` | Remove one document's chunks |
@@ -58,37 +64,40 @@ All settings are environment variables; `.env.example` lists each one with its d
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `LLM_PROVIDER` / `GROQ_MODEL` | groq / llama-3.3-70b-versatile | `anthropic` switches to Claude (`CLAUDE_MODEL`) |
+| `EMBEDDING_PROVIDER` | local | `openai` switches to text-embedding-3-small |
 | `CHUNK_MAX_SIZE` / `CHUNK_OVERLAP` | 1000 / 100 | Characters, not tokens |
 | `HYBRID_RETRIEVAL` | false | Add BM25 + reciprocal rank fusion |
 | `RERANK` | false | Naive lexical reorder (not a trained reranker) |
-| `SIMILARITY_THRESHOLD` | 0.3 | Abstain without calling the LLM below this. **Uncalibrated** |
+| `SIMILARITY_THRESHOLD` | 0.62 | Abstain without calling the LLM below this. Measured for local MiniLM on the eval corpus; re-measure if you change the model |
 | `CONTEXT_TOKEN_BUDGET` | 4000 | Estimated tokens of excerpts per prompt |
-| `CLAUDE_MODEL` / `CLAUDE_MAX_TOKENS` | claude-opus-5 / 4096 | Generation model and output cap |
+| `LLM_MAX_TOKENS` | 4096 | Output cap; a cut-off answer is an error, never shown |
 | `REQUEST_TIMEOUT_SECONDS` | 60 | Per-request limit (504) and SDK timeout |
 
 ## Layout
 
 ```
 src/financial_rag/
-  loaders/document_loader.py  1  PDF/TXT -> pages
+  loaders/document_loader.py  1  PDF/TXT -> pages, running headers stripped
   loaders/chunker.py          2  pages -> size-bounded chunks
-  embeddings.py, embedding_cache.py   3  batched, cached embeddings
+  embeddings.py, embedding_cache.py   3  local or OpenAI embeddings, cached, batched
   storage.py                  4  Chroma wrapper
   retrieval.py                5  vector [+ BM25/RRF] [+ rerank]
   prompt_builder.py           6  dedupe, budget, delimiters
-  llm.py                      7  generation + abstention
+  llm.py                      7  Groq or Claude, plus abstention
   citations.py                8  citation validation
   api.py, schemas.py, errors.py       9  HTTP layer
+  web/                        10  demo page (HTML/CSS/JS) and sample filings
   observability.py            JSON logs, latency, tokens, cost estimate
   config.py                   settings from env
-streamlit_app.py              10  UI (HTTP client only)
+streamlit_app.py              older UI (HTTP client only)
 eval/                         questions, fictional corpus, runner, scoring
 tests/                        offline test suite
 ```
 
 ## Status
 
-Built and tested offline, and the containers run locally. **Not yet run end to end against the real OpenAI and Anthropic APIs**, so there are no measured accuracy, latency or cost numbers yet; see INTERVIEW_WALKTHROUGH.md for exactly what is and isn't verified.
+Built and tested offline. The containers run locally, and ingest plus retrieval have been run for real with the local model. **Answer generation has not run against Groq yet**: no valid key was available, so there are no measured answer-quality or latency numbers. See INTERVIEW_WALKTHROUGH.md for exactly what is and isn't verified.
 
 ## AI usage
 

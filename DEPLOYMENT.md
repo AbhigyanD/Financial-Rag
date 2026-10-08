@@ -15,24 +15,27 @@ Chosen because it runs the existing container unchanged, behind managed HTTPS, s
 ## Local run (verified)
 
 ```bash
-cp .env.example .env            # add OPENAI_API_KEY and ANTHROPIC_API_KEY
-docker compose up --build -d    # API on :8000, UI on :8501
+cp .env.example .env            # add GROQ_API_KEY
+docker compose up --build -d    # demo page + API on :8000; older Streamlit UI on :8501
 ```
 
-What was actually run and observed, with no API keys present:
+What was actually run and observed on 2026-10-08, with no LLM key set:
 
 ```text
 $ docker compose up -d   -> api: healthy, ui: healthy   (Docker HEALTHCHECK on /health and /_stcore/health)
-$ curl -i localhost:8000/health
-HTTP/1.1 200 OK
-x-request-id: 22215781b19f
-{"status":"ok"}
-$ curl -H 'X-Request-ID: docker-test-1' -d '{"query":"What was revenue?"}' -H 'content-type: application/json' localhost:8000/query
-{"error":{"status":502,"message":"Retrieval failed: Failed to embed query: OPENAI_API_KEY is not set. ...","request_id":"docker-test-1"}}
+$ curl localhost:8000/info
+{"llm_provider":"groq","llm_model":"llama-3.3-70b-versatile","llm_key_configured":false,
+ "embedding_provider":"local","embedding_model":"sentence-transformers/all-MiniLM-L6-v2",...}
+$ curl -o /dev/null -w "%{http_code}" localhost:8000/       -> 200   (the demo page)
+$ curl -F file=@src/financial_rag/web/samples/northwind_annual_report_fy2025.pdf localhost:8000/ingest
+{"source":"northwind_annual_report_fy2025.pdf","pages":5,"empty_pages":0,"chunks_stored":5,"request_id":"dcc81f8644f9"}
 $ docker compose exec api id -u      -> 10001   (non-root)
-$ docker run --rm --entrypoint sh financial-rag-api -c 'test -f /app/.env && echo found || echo "no .env in image"'
-no .env in image
+$ docker image ls financial-rag      -> 2.75GB
 ```
+
+Ingest worked with no network access needed for the model: the embedding model is downloaded during `docker build` into `/app/model_cache`. An earlier run (before the Groq switch) also confirmed there's no `.env` inside the image; `.dockerignore` excludes it.
+
+The image is large (2.75 GB): Chroma, ONNX Runtime, PyMuPDF, and the Streamlit stack (pandas, pyarrow) dominate. Dropping the Streamlit client from the image would be the first cut.
 
 State lives in the named volume `rag-data` mounted at `/data` (`PERSIST_DIRECTORY=/data/chroma`, `EMBEDDING_CACHE_DIR=/data/embedding_cache`). It survives `docker compose down`; `docker compose down -v` deletes it.
 
@@ -50,10 +53,9 @@ gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
 gcloud artifacts repositories create rag --repository-format=docker --location=REGION
 gcloud builds submit --tag REGION-docker.pkg.dev/PROJECT/rag/financial-rag:latest
 
-# 2. Secrets: in Secret Manager, never in the image or in env flags
-printf %s "$OPENAI_API_KEY"    | gcloud secrets create openai-api-key --data-file=-
-printf %s "$ANTHROPIC_API_KEY" | gcloud secrets create anthropic-api-key --data-file=-
-# The service's runtime service account also needs roles/secretmanager.secretAccessor on both secrets.
+# 2. Secret: in Secret Manager, never in the image or in env flags
+printf %s "$GROQ_API_KEY" | gcloud secrets create groq-api-key --data-file=-
+# The service's runtime service account also needs roles/secretmanager.secretAccessor on it.
 
 # 3. Storage for the vector index (see Persistence)
 gcloud storage buckets create gs://BUCKET --location=REGION
@@ -63,22 +65,17 @@ gcloud run deploy financial-rag-api \
     --image REGION-docker.pkg.dev/PROJECT/rag/financial-rag:latest \
     --region REGION --execution-environment gen2 \
     --max-instances 1 --memory 1Gi --timeout 120 \
-    --set-secrets OPENAI_API_KEY=openai-api-key:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest \
+    --set-secrets GROQ_API_KEY=groq-api-key:latest \
     --add-volume name=data,type=cloud-storage,bucket=BUCKET \
     --add-volume-mount volume=data,mount-path=/data \
     --no-allow-unauthenticated
 
-# 5. UI service, pointed at the API
-gcloud run deploy financial-rag-ui \
-    --image REGION-docker.pkg.dev/PROJECT/rag/financial-rag:latest \
-    --region REGION --command streamlit \
-    --args run,streamlit_app.py,--server.address=0.0.0.0,--server.port=8080 \
-    --set-env-vars API_URL=https://<financial-rag-api URL>
+# The demo page is served by the API itself at /, so no second service is needed.
 ```
 
 Health check: the container honors `$PORT` and serves `GET /health`. Cloud Run's default startup probe is a TCP check on that port; an HTTP probe on `/health` would be configured on the service (not done here).
 
-`--no-allow-unauthenticated` matters: the API has **no authentication of its own**, and every query spends real money. As written, the UI service would also need an identity token to call it. That wiring isn't done.
+`--no-allow-unauthenticated` matters: the API has **no authentication of its own**, and every query spends your Groq quota (or money, on a paid plan). With authentication required, opening the demo page needs an authenticated proxy (e.g. `gcloud run services proxy financial-rag-api`). That wiring isn't done.
 
 ## Persistence: the real limitation
 

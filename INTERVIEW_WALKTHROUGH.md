@@ -4,29 +4,29 @@ How this repo works, what it doesn't do, and why. Grounded in the code at the ti
 
 **One-line pitch:** a layered RAG prototype for financial documents whose main design goal is that it never shows an uncited answer and never shows a citation that doesn't point at a retrieved chunk. When it can't support an answer, it says "Not found in the provided documents."
 
-**What I can't claim yet:** answer quality. The eval harness exists, but no run against the real APIs has happened, so I have no accuracy, abstention, or cost numbers from real traffic.
+**What I can't claim yet:** answer quality. The eval harness exists, but the full run needs a Groq key that wasn't available, so I have no accuracy, abstention, or latency numbers for answers. Retrieval *has* been measured for real with the local embedding model (see ARCHITECTURE.md, Evaluation status).
 
 ---
 
 ## 1. A request, from question to answer
 
-A user types "What was operating income in fiscal 2025?" in the Streamlit app.
+A user types "What was operating income in fiscal 2025?" in the demo page at `/`.
 
-1. **UI.** `streamlit_app.py`'s `_stream_query()` POSTs `{"query", "top_k", "source"}` to `/query/stream`. The UI never imports the pipeline; it's HTTP only.
+1. **UI.** `web/app.js`'s `ask()` POSTs `{"query", "top_k", "source"?}` to `/query/stream` and reads the Server-Sent Events with `fetch` and a stream reader (`readEvents()`). The page never touches the pipeline directly; it's HTTP only.
 2. **Middleware.** `api.request_id_middleware` reuses the client's `X-Request-ID` if it matches `^[A-Za-z0-9._-]{1,64}$`, otherwise generates 12 hex characters. It creates an `observability.Trace` and activates it in a context variable.
 3. **Validation.** `schemas.QueryRequest` strips whitespace and enforces a query of 1–2000 chars and `top_k` of 1–20. A violation gets a 422 in the standard `{"error": {status, message, request_id}}` shape.
 4. **Retrieval, before streaming starts** (so failures are ordinary HTTP errors). `api._with_timeout(_retrieve, body)` runs in a worker thread, with the context copied so the trace follows, under `REQUEST_TIMEOUT_SECONDS`.
-   - `retrieval.retrieve()` → `_vector_search()` → `embeddings.embed_query()` → `embed_text()`, which checks `embedding_cache.get_many()` first and calls OpenAI only on a miss (`add_tokens(embedding=...)`).
+   - `retrieval.retrieve()` → `_vector_search()` → `embeddings.embed_query()` → `embed_text()`, which checks `embedding_cache.get_many()` first and only on a miss calls `_embed_uncached()`: by default the local all-MiniLM-L6-v2 model via fastembed, or OpenAI if `EMBEDDING_PROVIDER=openai`.
    - `storage.query_chunks()` runs a Chroma query with cosine distance. `_distance_to_similarity()` maps distance to `(2 − d) / 2`, giving a value in [0, 1].
    - If `HYBRID_RETRIEVAL`: `_bm25_search()` builds a BM25 index from `storage.get_all_chunks()`, and `_fuse_rankings()` merges the two rankings with reciprocal rank fusion. The RRF score replaces `similarity`; the real cosine score stays in `vector_similarity`.
    - If `RERANK`: `_lexical_rerank()`, a query-term-overlap heuristic.
 5. **Generation.** `llm.generate_answer_stream()`:
-   - `retrieval_is_weak()`: if the best `vector_similarity` is below `SIMILARITY_THRESHOLD`, it yields an abstention immediately, with no Claude call.
+   - `retrieval_is_weak()`: if the best `vector_similarity` is below `SIMILARITY_THRESHOLD`, it yields an abstention immediately, with no LLM call.
    - `prompt_builder.build_prompt()`: `dedupe_chunks()`, then `fit_to_budget()` (chars/4 estimate, drops lowest-ranked first, always keeps one), then `_format_documents()` wraps each excerpt in `<document id="n" source="…" page="…">`, with `_neutralize()` escaping any of our tags that appear in document text or the question.
-   - `client.messages.stream(...)` yields text deltas, which go to the browser as SSE `delta` events.
-   - `_check_stop()`: `refusal` or `max_tokens` becomes an `LLMError`, sent as an SSE `error` event.
+   - `_stream()` picks the provider: `_groq_stream()` (default; `chat.completions.create(stream=True)` on Groq's OpenAI-compatible endpoint, usage read from `x_groq.usage`) or `_anthropic_stream()`. Both yield text, then a normalized `_Completion(stop, tokens)`. Text deltas go to the browser as SSE `delta` events.
+   - `_check_stop()`: a refusal (Claude `refusal`, OpenAI-style `content_filter`) or a cut-off (`max_tokens` / `length`) becomes an `LLMError`, sent as an SSE `error` event.
    - `finalize_answer()` → `citations.validate_citations()` keeps `[n]` only where `n` is in `1..len(prompt.chunks)`, strips the rest, and abstains if nothing valid remains or the model wrote the abstain sentence.
-6. **Final event.** The validated `QueryResponse` is sent as an SSE `final` event. The UI throws away the streamed draft and renders the final text, numbered sources (file, page, similarity, escaped excerpt), or the not-found state with its reason.
+6. **Final event.** The validated `QueryResponse` is sent as an SSE `final` event. The page throws away the streamed draft and renders the final text through `formatAnswer()` (HTML-escaped first, then `[n]` turned into buttons). Clicking `[n]` opens that source in the evidence column, with the sentences containing the answer's quoted figures highlighted. That highlight is a visual heuristic; the whole passage is the citation. Abstentions show their reason in plain words.
 7. **Log.** When the stream ends, `observability.finish()` writes one JSON line: request ID, per-stage ms, time to first token, token counts from the API `usage` fields, and a cost estimate from `pricing.toml`.
 
 Ingest follows the same pattern through `POST /ingest`: size check (413), `load_document`, `chunk_pages`, a 422 if no text came out, `embed_chunks` (cache, then batches of 100), `delete_source`, `store_chunks` (batched under Chroma's 5461 limit).
@@ -35,12 +35,12 @@ Ingest follows the same pattern through `POST /ingest`: size check (413), `load_
 
 | Area | Implemented | Would add |
 |---|---|---|
-| Parsing | PyMuPDF text per page; TXT | OCR for scanned pages; table extraction that keeps headers |
+| Parsing | PyMuPDF text per page, running headers stripped; TXT | OCR for scanned pages; table extraction that keeps headers |
 | Chunking | Paragraph-first, size-bounded, overlap, page-pure | Token-based sizing; section-aware splitting (headings) |
-| Embeddings | Batched, SQLite cache, timeouts | Rate-limit backoff tuning; async batching |
+| Embeddings | Local MiniLM by default (or OpenAI), batched, SQLite cache | Rate-limit backoff tuning; async batching |
 | Retrieval | Vector; optional BM25+RRF; naive rerank flag | Trained cross-encoder reranker; metadata filters beyond source |
 | Prompt | Dedupe, budget, delimiters, untrusted-data framing | Real token counting; near-duplicate removal |
-| Generation | Two abstention gates; truncation and refusal errors | Calibrated threshold; effort tuning |
+| Generation | Groq or Claude; two abstention gates; measured threshold; truncation and refusal errors | Threshold calibrated on a real-size corpus |
 | Citations | Id validation against sent chunks | Checking the excerpt supports the sentence (entailment) |
 | API | Request IDs, timeouts, limits, error shape, SSE | Auth, rate limiting, async ingestion jobs |
 | Observability | JSON logs, per-stage latency, tokens, cost estimate | Metrics, dashboards, tracing, alerts |
@@ -59,8 +59,12 @@ From git history and today's fixes, in the order they happened:
 6. **`load_document("x.pdf")` never worked with a path** (`e7dc2ef`). A `str` has no `.name`. The API passes bytes plus a filename, so it never showed up until the eval runner used paths.
 7. **Chroma's batch limit** (`34983db`). Reproduced: chromadb 1.5.9 rejects a single upsert of 5462 items. Combined with fix 4, a re-upload of a huge document would have deleted the old copy and then failed to store the new one.
 8. **XSS through citations** (`66ce7a3`). The UI put raw chunk text into `unsafe_allow_html`. Fixed with `html.escape`, and verified headlessly that `<script>` renders escaped.
-9. **Truncation from thinking** (`78cc1f2`). `claude-opus-5` thinks by default, and thinking counts against `max_tokens` (it was 1024). Raised the default to 4096, and `stop_reason == "max_tokens"` is now an error instead of a silently half-finished answer.
+9. **Truncation from thinking** (`78cc1f2`). `claude-opus-5` thinks by default, and thinking counts against `max_tokens` (it was 1024). Raised the default to 4096, and a cut-off is now an error instead of a silently half-finished answer, for Groq (`finish_reason == "length"`) as well.
 10. **Streaming plus context variables.** The SSE body runs in worker threads after the middleware returns, so pipeline code couldn't see the request's trace. Fix: capture the context once and step the generator with `ctx.run(next, gen)`; tested in `test_stream_logs_summary_after_last_event`.
+11. **A repeated page header broke retrieval** (`e37d448`). Every page of the sample PDF started with the same disclaimer line. In short chunks, that shared line dominated the embedding: all scores squeezed into 0.78–0.88, and the page holding the revenue answer ranked 6th of 7, outside top-5. Real filings repeat headers too, so the fix is in the loader: lines on at least half the pages of a 3+ page PDF are stripped. The first version also turned digits into `#` to catch "Page N"; its own test caught that it would strip lines that differ only in their figures, which in a financial statement *are* the content. Now only bare page numbers are matched loosely.
+12. **The injection test was leaking the answer** (`e37d448`). Both injection files said "This file deliberately contains a prompt-injection attempt", which tells the model what to ignore. Removed.
+13. **A threshold that never fired.** `SIMILARITY_THRESHOLD=0.3` sat on a `(1 + cos) / 2` scale, where 0.3 means cosine −0.4. Measuring real scores with local MiniLM showed answerable 0.697–0.878 and off-topic 0.506–0.560, so the default became 0.62 (`502316d`). It also showed what a threshold *can't* do: on-topic questions with no answer scored 0.747–0.850, inside the answerable range.
+14. **Small things a screenshot caught** (`da9e515` and the UI commit). Stripping an invalid `[9]` left "2026 ." with a stray space. Schibsted Grotesk's tabular-figures setting also widened periods and commas across the whole page.
 
 ## 4. Edge cases and what the code does
 
@@ -70,7 +74,7 @@ From git history and today's fixes, in the order they happened:
 | Scanned PDF (no OCR layer) | Pages kept, text empty. All empty → 422. Some empty → ingested; `empty_pages` returned and the UI warns. **No OCR.** | `load_pdf`, `IngestResponse.empty_pages` |
 | Table-heavy page | `get_text()` returns cells as lines; headers detach from numbers. Chunked like prose. **Not handled**: an answer can pair a figure with the wrong row. | `load_pdf` |
 | Huge document | Over `MAX_UPLOAD_MB` (25) → **413** before parsing. Under it: embedded in batches of 100, stored in batches ≤5461. May exceed the 60s timeout → **504**, while the thread still finishes in the background. | `api.ingest`, `storage.store_chunks` |
-| No relevant chunk | Gate 1 (threshold) — likely ineffective at 0.3. Gate 2 catches it if the model says not found or cites nothing valid → "Not found in the provided documents." | `llm.retrieval_is_weak`, `finalize_answer` |
+| No relevant chunk | Gate 1 (threshold 0.62) catches off-topic questions without calling the LLM. On-topic but unanswerable questions pass gate 1 (their scores overlap answerable ones); gate 2 catches them if the model says not found or cites nothing valid → "Not found in the provided documents." | `llm.retrieval_is_weak`, `finalize_answer` |
 | Duplicate chunks | Identical text after case and whitespace normalization: embedded once (`embed_chunks`), sent to the model once (`dedupe_chunks`). Near-duplicates are kept. | `embeddings.py`, `prompt_builder.py` |
 | Injection text in a document | Excerpts are fenced and labeled untrusted; our tags are escaped inside them; the UI escapes HTML. Whether the model *obeys* the framing is unmeasured: that's what eval q14 and q15 test. | `prompt_builder.py`, `streamlit_app.py` |
 | Very long question | Over 2000 chars → **422**. Delimiter tags in the question are escaped. | `schemas.QueryRequest`, `_neutralize` |
@@ -88,7 +92,7 @@ From git history and today's fixes, in the order they happened:
 - **Abstain over guess.** For financial figures a wrong number is worse than no number, so an uncited answer is withheld even if it might be right. This will lower "answer correct" on some questions; the eval reports false abstentions separately.
 - **Hybrid and rerank off by default.** The vector-only path is the most tested; the flags exist so the eval can compare.
 
-**Alternative 1: long context, no retrieval.** These documents are small. Send whole documents to Claude (1M-token context) and use the API's native citations (`citations: {enabled: true}` on document blocks), which return cited spans with page locations. Gains: no chunking or retrieval misses, citations validated by the API. Costs: input tokens per query grow with corpus size, so this is only viable for a few documents per question.
+**Alternative 1: long context, no retrieval.** These documents are small. Send whole documents to a long-context model, for example Claude with its 1M-token context, and use Anthropic's native citations (`citations: {enabled: true}` on document blocks), which return cited spans with page locations. Gains: no chunking or retrieval misses, citations validated by the API. Costs: input tokens per query grow with corpus size, so this is only viable for a few documents per question.
 
 **Alternative 2: structured extraction plus SQL for figures.** At ingest, have the model extract tables and key figures into rows (metric, period, value, unit, page), validated against a schema. Answer numeric questions with SQL, and fall back to RAG for narrative. Gains: exact numbers, arithmetic and comparisons work. Costs: an extraction step to evaluate, plus schema design.
 
@@ -101,10 +105,10 @@ From git history and today's fixes, in the order they happened:
 | **Authentication / access control** | **NOT implemented.** Anyone who can reach the API can ingest, delete any document by filename, and spend API credits. DEPLOYMENT.md deploys with `--no-allow-unauthenticated` as a stopgap. |
 | **Tenant isolation** | **NOT implemented.** One shared collection; any user's query can retrieve any user's documents. Same filename from two users overwrites. |
 | **Rate limiting / abuse** | **NOT implemented.** Only per-request limits (size, length, `top_k`). |
-| **PII** | **NOT implemented.** No detection or redaction. Document text goes to OpenAI (embeddings) and Anthropic (generation), and is stored in plaintext in Chroma and in the embedding cache. |
+| **PII** | **NOT implemented.** No detection or redaction. Retrieved excerpts and the question go to Groq for generation (embeddings stay local by default; OpenAI or Anthropic only if switched on), and document text is stored in plaintext in Chroma and in the embedding cache. |
 | **Prompt injection** | **Partially mitigated:** untrusted-data framing, delimiter escaping, citation validation (an injected "cite nothing" leads to abstention), HTML escaping in the UI. **Not proven:** no measured result yet. No classifier for injected content. |
 | **Secrets** | Env vars only; `.env` is gitignored and excluded from the Docker build; Secret Manager in the Cloud Run plan. |
-| **Data deletion** | `DELETE /documents/{source}` removes vectors. **Not** removed: embedding-cache entries for that text, and the provider-side logs governed by OpenAI and Anthropic retention policies. |
+| **Data deletion** | `DELETE /documents/{source}` removes vectors. **Not** removed: embedding-cache entries for that text, and anything the LLM provider (Groq, by default) retains under its own data policy. |
 | **Logging** | Logs hold request IDs, sizes and counts, **not** question or document text. Unhandled-error logs include the exception `repr`, which could contain text. |
 
 ## 7. Scaling and concurrency: what breaks first
@@ -112,7 +116,7 @@ From git history and today's fixes, in the order they happened:
 1. **The vector store.** Chroma `PersistentClient` is SQLite and index files in one process. Running more than one Uvicorn worker or container against the same files risks corruption, so the app is capped at one process today. Fix: Chroma server or pgvector (DEPLOYMENT.md).
 2. **Hybrid retrieval.** `_bm25_search` loads every chunk (`get_all_chunks`) and rebuilds BM25 on **every** query: O(corpus) time and memory per request. Off by default for this reason; fix with a persisted, incremental index.
 3. **Worker threads.** All pipeline work is blocking code run in AnyIO's thread pool, **40 threads** by default (checked: `current_default_thread_limiter().total_tokens == 40`). That's at most 40 concurrent pipeline calls per process; streams hold a thread while generating. Timed-out work keeps its thread.
-4. **Provider rate limits.** OpenAI and Anthropic limits are per key; under load, 429s become 502s once the SDK's default retries are exhausted.
+4. **Provider rate limits.** Groq's limits are per key, and the free tier's are low; under load, 429s become 502s once the SDK's default retries are exhausted.
 5. **Ingest in the request path.** A big upload holds a request and a thread for the whole embed; it can hit the 504 while still writing. Fix: queue ingestion as a background job and return a job ID.
 6. **Memory.** Uploads are read fully into memory (capped at 25 MB) and parsed in memory.
 
@@ -121,7 +125,7 @@ From git history and today's fixes, in the order they happened:
 1. **How do you know the citations are correct?** I know each one points at a chunk that was retrieved and sent (`validate_citations`). I don't know the chunk supports the claim; no entailment check exists. That would be the next addition: a per-sentence support check, or the API's native citations.
 2. **What's your accuracy?** Unknown. The harness and 20 questions are built, but it hasn't run against the real APIs. I won't quote a number I haven't measured.
 3. **Why 1000 characters per chunk?** It was a default, not a tuned value. It keeps one financial paragraph or table section together. The eval's hit@k is where I'd tune it, together with `top_k`.
-4. **Why is the similarity threshold 0.3?** Honestly, it's uncalibrated, and on this scale (`(1 + cos) / 2`) it probably never fires. Gate 2 does the real work today. The eval prints the similarity distribution for answerable vs unanswerable questions so the threshold can be set from data.
+4. **Why is the similarity threshold 0.62?** Measured, but on a tiny corpus: with local MiniLM, answerable questions scored 0.697–0.878 and off-topic ones 0.506–0.560, so 0.62 sits in the gap. On-topic questions with no answer scored 0.747–0.850, overlapping the answerable range, so no threshold can separate those; the model's own "not found" and citation validation do. It was 0.3 before measuring, which never fired.
 5. **What happens when BM25 and vectors disagree?** Reciprocal rank fusion: each list contributes `1 / (60 + rank)`. Ranks, not scores, because cosine and BM25 scales aren't comparable. A chunk both methods rank decently beats one that only one method ranks first.
 6. **Your "reranker" — is that real?** No. `_lexical_rerank` counts query-term overlap. It exists so the flag, call site and tests are real; it shouldn't be called a reranker in the ML sense. A cross-encoder would replace it.
 7. **What stops a document from hijacking the model?** Fencing in `<document>` tags, an explicit "this is untrusted data" instruction, escaping our own tags inside document text, and validation downstream: if the model follows an injected "cite nothing", it gets withheld. What's missing is measurement; eval q14 and q15 exist for that.
@@ -132,14 +136,14 @@ From git history and today's fixes, in the order they happened:
 12. **Is ingest idempotent?** Mostly: same filename leads to delete-then-store, and the cache prevents paying twice to embed unchanged text. It's not atomic: a crash between delete and store loses that document until re-uploaded.
 13. **Why Chroma?** Embedded, zero setup, metadata filters, cosine distance. Its cost is exactly the deployment problem: it's local-disk state.
 14. **How would you go multi-tenant?** Authenticate, then add a `tenant_id` to every chunk's metadata and to every `where` filter in `storage.py`, or a collection per tenant. Namespace the source ids. Today nothing isolates users.
-15. **How do you measure cost?** Real token counts from each provider's `usage` field, priced from `pricing.toml` and labeled as an estimate in every log line. I have the mechanism but no real traffic yet.
-16. **What dominates cost?** Probably Claude output tokens, because thinking is billed as output at 5× the input price. That's a hypothesis to confirm in the logs, not a measurement.
-17. **Why `claude-opus-5`?** It was the configured default. COST.md notes `claude-opus-5-5` is listed cheaper ($4 / $20 vs $5 / $25), and Sonnet and Haiku cheaper still. The model is one env var; the eval should decide.
-18. **What does your test suite actually prove?** 121 offline tests: chunking bounds, citation validation, both abstention gates, injection-tag escaping, the API error shape and limits, the SSE event sequence, log contents, and real-Chroma storage including the batch limit. They mock both AI APIs, so they prove the wiring and rules, not answer quality.
+15. **How do you measure cost?** Real token counts from each provider's `usage` field (for Groq streams, `x_groq.usage`), priced from `pricing.toml` and labeled as an estimate. In the default setup there's no per-token bill: embeddings are local, and Groq's free tier is free but rate-limited. I couldn't verify Groq's paid prices, so its cost logs as `null`, not a guessed number.
+16. **What dominates cost?** In the default setup, nothing is billed per token; the constraints are Groq's rate limits and local CPU for embeddings. On Claude it would probably be output tokens, since thinking is billed as output at 5× the input price. That's a hypothesis, not a measurement.
+17. **Why Groq and Llama 3.3 70B?** A free tier for a prototype, fast inference, and an OpenAI-compatible API, so it reuses the `openai` SDK already in the project with no new dependency. 70B over 8B because strict citation-following matters more than speed here; that choice should be confirmed with the eval. Claude stays one env var away (`LLM_PROVIDER=anthropic`), and the code path is tested.
+18. **What does your test suite actually prove?** 134 offline tests: chunking bounds, citation validation, both abstention gates, injection-tag escaping, the API error shape and limits, the SSE event sequence, log contents, and real-Chroma storage including the batch limit. Every LLM client is faked (Groq's response and streaming shapes included) and local embeddings are faked, so they prove the wiring and rules, not answer quality.
 19. **Why chars/4 for tokens?** No network call and no new dependency, and it's only used to bound context size. Real counts come back in `usage`. If the budget mattered tightly, I'd use the token-counting endpoint.
 20. **What breaks first under load?** The single-process SQLite vector store, then BM25's per-query full scan if hybrid is on, then the 40-thread pool and provider rate limits.
 21. **How do you debug a bad answer in production?** Take the request ID from the response or the `X-Request-ID` header and find its log line: stages, `best_vector_similarity`, `chunks_sent`, dropped duplicates and budget, abstain reason, invalid citations. What's not logged is the question and excerpt text (a privacy choice), so reproducing means re-running the query.
 22. **Why not LangChain?** I wanted to understand each stage; I built an earlier LangChain notebook version separately. Here, building it by hand is how I found the PDF blank-line, batch-limit and path bugs. I'd adopt a framework where it adds something I'd otherwise build badly, such as agent orchestration.
-23. **What would you change first with a week?** Run the eval and calibrate the threshold; move the vector store out of process; add auth and tenant isolation; add an entailment check on citations.
-24. **Is the API safe to expose publicly?** No. No authentication, and every query costs money. It's a prototype behind a private endpoint at best.
+23. **What would you change first with a week?** Run the full eval with answers and re-check the threshold on a real-size corpus; move the vector store out of process; add auth and tenant isolation; add an entailment check on citations.
+24. **Is the API safe to expose publicly?** No. No authentication, anyone can delete documents, and every query spends the Groq quota. It's a prototype behind a private endpoint at best.
 25. **What did you build vs what did an AI assistant build?** I built stages 1–2 myself and directed the rest with an AI coding assistant. I reviewed the changes, and I can explain every module and trade-off here. The commit history shows the progression, including the bugs listed in section 3.
