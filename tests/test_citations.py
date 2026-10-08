@@ -40,6 +40,11 @@ def test_out_of_range_citation_is_reported_and_stripped():
     assert "[1]" in check.text
 
 
+def test_stripping_a_marker_leaves_no_space_before_punctuation():
+    check = validate_citations("Revenue was $412.6M [1]. Guidance is $435M [9].", _chunks(2))
+    assert check.text == "Revenue was $412.6M [1]. Guidance is $435M."
+
+
 def test_mixed_group_keeps_only_valid_ids():
     check = validate_citations("Both [1, 9].", _chunks(2))
     assert "[1]" in check.text

@@ -18,6 +18,7 @@ from financial_rag.retrieval import RetrievedChunk
 # so "[Note]" or "[2024]"-style text isn't mistaken for a citation of
 # excerpt 2024 — ids above the excerpt count are just reported invalid.
 _CITATION = re.compile(r"\[(\d{1,4}(?:\s*,\s*\d{1,4})*)\]")
+_CITATION_WITH_SPACE = re.compile(r"([ \t]*)" + _CITATION.pattern)
 
 
 class Citation(TypedDict):
@@ -69,8 +70,11 @@ def validate_citations(answer: str, sent_chunks: list[RetrievedChunk]) -> Citati
             )
 
     def _rewrite(match: re.Match) -> str:
-        kept = [p.strip() for p in match.group(1).split(",") if int(p) in valid_range]
-        return f"[{', '.join(kept)}]" if kept else ""
+        space, ids = match.group(1), match.group(2)
+        kept = [p.strip() for p in ids.split(",") if int(p) in valid_range]
+        # Dropping a whole marker also drops the space before it, so
+        # "in 2026 [9]." becomes "in 2026." rather than "in 2026 .".
+        return f"{space}[{', '.join(kept)}]" if kept else ""
 
-    cleaned = _CITATION.sub(_rewrite, answer) if invalid else answer
+    cleaned = _CITATION_WITH_SPACE.sub(_rewrite, answer) if invalid else answer
     return CitationCheck(text=cleaned, citations=list(cited.values()), invalid_ids=invalid)
