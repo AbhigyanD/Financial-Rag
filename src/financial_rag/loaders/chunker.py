@@ -1,15 +1,13 @@
-"""Split extracted text into chunks while preserving page metadata.
+"""Split extracted page text into size-bounded chunks, keeping page numbers.
 
-This is stage 2 of the ingest pipeline: given a list[PageText] from stage 1
-(document_loader), split the text into smaller chunks suitable for embedding.
-Each chunk retains its source page number for later citations.
+Why: embeddings work best on focused passages, and a chunk that never
+spans two pages can always be cited back to exactly one page.
 
-Chunking strategies:
-- By character count: simple, fast, predictable size
-- By sentence/paragraph: respects document structure, fewer boundary breaks
-- By token count: precise for a given model's context window (requires tokenizer)
-
-For now, we'll focus on character-based chunking with paragraph-aware splitting.
+Method: split each page on blank lines (paragraphs); break any paragraph
+over the max size at line breaks, then sentence ends, then a hard cut;
+greedily merge pieces up to CHUNK_MAX_SIZE characters, carrying
+CHUNK_OVERLAP characters from the previous chunk into the next.
+Sizes are characters, not tokens.
 """
 
 from __future__ import annotations
@@ -41,8 +39,30 @@ def _split_by_paragraphs(text: str) -> list[str]:
     split_paragraphs = re.split(r"\n\s*\n", text)
     return [p.strip() for p in split_paragraphs if p.strip()]
 
+
+def _split_oversized(paragraph: str, max_chunk_size: int) -> list[str]:
+    """Break a paragraph longer than max_chunk_size into pieces that fit.
+
+    PDF extraction often drops blank lines, so a whole page can arrive as
+    one "paragraph". Without this, that page becomes one chunk of any
+    size. Tries the gentlest boundary first: line breaks, then sentence
+    ends, then a hard cut as a last resort (e.g. one giant table row).
+    """
+    if len(paragraph) <= max_chunk_size:
+        return [paragraph]
+
+    for pattern in (r"\n", r"(?<=[.!?])\s+"):
+        parts = [p.strip() for p in re.split(pattern, paragraph) if p.strip()]
+        if len(parts) > 1:
+            pieces = []
+            for part in parts:
+                pieces.extend(_split_oversized(part, max_chunk_size))
+            return _merge_chunks(pieces, max_chunk_size, joiner=" ")
+
+    return [paragraph[i : i + max_chunk_size] for i in range(0, len(paragraph), max_chunk_size)]
+
 def _merge_chunks(
-    paragraphs: list[str], max_chunk_size: int, overlap: int = 0
+    paragraphs: list[str], max_chunk_size: int, overlap: int = 0, joiner: str = "\n\n"
 ) -> list[str]:
     """Greedily merge paragraphs until reaching max_chunk_size.
 
@@ -58,8 +78,9 @@ def _merge_chunks(
     land on a word boundary.
 
     Returns a list of merged chunks. Each chunk is at most
-    `max_chunk_size + overlap` characters (unless a single paragraph on
-    its own exceeds `max_chunk_size`, in which case that chunk is larger).
+    `max_chunk_size + overlap` characters, provided no input paragraph
+    exceeds `max_chunk_size` (chunk_pages guarantees this by running
+    _split_oversized first).
     """
     chunks = []
     current_chunk = ""
@@ -67,7 +88,7 @@ def _merge_chunks(
         if not current_chunk:
             current_chunk = paragraph
         else:
-            potential_chunk = current_chunk + "\n\n" + paragraph
+            potential_chunk = current_chunk + joiner + paragraph
             if len(potential_chunk) <= max_chunk_size:
                 current_chunk = potential_chunk
             else:
@@ -107,7 +128,11 @@ def chunk_pages(
     for page in pages:
         page_number = page["page_number"]
         text = page["text"]
-        paragraphs = _split_by_paragraphs(text)
+        paragraphs = [
+            piece
+            for paragraph in _split_by_paragraphs(text)
+            for piece in _split_oversized(paragraph, max_chunk_size)
+        ]
         merged_chunks = _merge_chunks(paragraphs, max_chunk_size, overlap)
         for chunk_text in merged_chunks:
             chunk = Chunk(

@@ -65,6 +65,42 @@ def test_chunk_pages_default_overlap_is_zero():
     assert chunks[1]["text"] == long_paragraph_b
 
 
+def test_page_with_no_blank_lines_is_still_split_to_max_size():
+    # PyMuPDF often returns a page with single newlines only — one
+    # "paragraph". It must not become one oversized chunk.
+    lines = "\n".join(f"Line {i} of a page that lost its blank lines." for i in range(60))
+    chunks = chunk_pages([{"page_number": 3, "text": lines}], max_chunk_size=300)
+
+    assert len(chunks) > 1
+    assert all(len(c["text"]) <= 300 for c in chunks)
+    assert all(c["page_number"] == 3 for c in chunks)
+
+
+def test_oversized_text_without_line_breaks_splits_on_sentences():
+    text = " ".join(f"Sentence number {i} is here." for i in range(50))
+    chunks = chunk_pages([{"page_number": 1, "text": text}], max_chunk_size=200)
+
+    assert all(len(c["text"]) <= 200 for c in chunks)
+    assert all(c["text"].endswith(".") for c in chunks)
+
+
+def test_unbreakable_text_is_hard_cut_at_max_size():
+    chunks = chunk_pages([{"page_number": 1, "text": "x" * 950}], max_chunk_size=400)
+    assert [len(c["text"]) for c in chunks] == [400, 400, 150]
+
+
+def test_no_text_is_lost_when_splitting_oversized_pages():
+    words = [f"w{i}" for i in range(400)]
+    text = " ".join(f"{w}." for w in words)
+    chunks = chunk_pages([{"page_number": 1, "text": text}], max_chunk_size=120)
+    joined = " ".join(c["text"] for c in chunks)
+    assert all(f"{w}." in joined for w in words)
+
+
+def test_empty_and_whitespace_pages_produce_no_chunks():
+    assert chunk_pages([{"page_number": 1, "text": ""}, {"page_number": 2, "text": "  \n\n "}]) == []
+
+
 def test_chunk_pages_overlap_carries_text_into_next_chunk():
     long_paragraph_a = "A" * 60
     long_paragraph_b = "B" * 60
