@@ -79,7 +79,9 @@ async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
         (StorageError, 500, "Failed to store document"),
     ):
         pages = load_document(contents, filename=filename)
-        chunks = chunk_pages(pages)
+        chunks = chunk_pages(
+            pages, max_chunk_size=settings.chunk_max_size, overlap=settings.chunk_overlap
+        )
         embedded_chunks = embed_chunks(chunks)
         chunks_stored = store_chunks(embedded_chunks, source=filename)
 

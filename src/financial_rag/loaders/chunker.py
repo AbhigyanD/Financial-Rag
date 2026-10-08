@@ -42,7 +42,7 @@ def _split_by_paragraphs(text: str) -> list[str]:
     return [p.strip() for p in split_paragraphs if p.strip()]
 
 def _merge_chunks(
-    paragraphs: list[str], max_chunk_size: int
+    paragraphs: list[str], max_chunk_size: int, overlap: int = 0
 ) -> list[str]:
     """Greedily merge paragraphs until reaching max_chunk_size.
 
@@ -50,9 +50,16 @@ def _merge_chunks(
     max_chunk_size (in characters). Once adding the next paragraph would
     exceed the limit, start a new chunk.
 
-    Returns a list of merged chunks. Each chunk is at most max_chunk_size
-    characters (unless a single paragraph exceeds it, in which case the
-    chunk will be larger).
+    If `overlap > 0`, each new chunk (after the first) is seeded with up
+    to `overlap` characters taken from the END of the previous chunk,
+    so a sentence split across a chunk boundary still appears in full in
+    at least one chunk. This is a character-count carry-over, not
+    paragraph-aware — it won't re-split a paragraph to make the overlap
+    land on a word boundary.
+
+    Returns a list of merged chunks. Each chunk is at most
+    `max_chunk_size + overlap` characters (unless a single paragraph on
+    its own exceeds `max_chunk_size`, in which case that chunk is larger).
     """
     chunks = []
     current_chunk = ""
@@ -65,14 +72,15 @@ def _merge_chunks(
                 current_chunk = potential_chunk
             else:
                 chunks.append(current_chunk)
-                current_chunk = paragraph
+                carry = current_chunk[-overlap:] if overlap > 0 else ""
+                current_chunk = f"{carry}\n\n{paragraph}" if carry else paragraph
 
     if current_chunk:
         chunks.append(current_chunk)  # Add the last chunk if non-empty
     return chunks
 
 def chunk_pages(
-    pages: list[PageText], max_chunk_size: int = 1000, overlap: bool = False
+    pages: list[PageText], max_chunk_size: int = 1000, overlap: int = 0
 ) -> list[Chunk]:
     """Split a list of pages into chunks while preserving page numbers.
 
@@ -80,14 +88,17 @@ def chunk_pages(
         pages: List of PageText dicts from document_loader.
         max_chunk_size: Target chunk size in characters. Chunks may exceed
             this if a single paragraph is larger.
-        overlap: Not yet implemented; for future use (e.g., sliding window).
+        overlap: Characters of the previous chunk to carry into the start
+            of the next one (within the same page), so a sentence split
+            across a chunk boundary isn't lost. 0 disables overlap.
 
     Returns:
         A list of Chunk dicts, each with page_number, text, and chunk_index.
 
     Strategy:
         1. For each page, split its text into paragraphs.
-        2. Merge paragraphs within a page until reaching max_chunk_size.
+        2. Merge paragraphs within a page until reaching max_chunk_size,
+           carrying `overlap` characters from one chunk into the next.
         3. Stamp each chunk with the source page_number.
         4. Assign a global chunk_index (0, 1, 2, ...).
     """
@@ -97,7 +108,7 @@ def chunk_pages(
         page_number = page["page_number"]
         text = page["text"]
         paragraphs = _split_by_paragraphs(text)
-        merged_chunks = _merge_chunks(paragraphs, max_chunk_size)
+        merged_chunks = _merge_chunks(paragraphs, max_chunk_size, overlap)
         for chunk_text in merged_chunks:
             chunk = Chunk(
                 page_number=page_number,

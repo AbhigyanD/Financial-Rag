@@ -21,6 +21,7 @@ from typing import TypedDict
 
 from openai import OpenAI, OpenAIError
 
+from financial_rag import embedding_cache
 from financial_rag.config import settings
 from financial_rag.loaders.chunker import Chunk
 
@@ -64,6 +65,9 @@ def _get_client() -> OpenAI:
 def embed_text(text: str) -> list[float]:
     """Embed a single string of text into a vector.
 
+    Checks the on-disk cache (embedding_cache.py) first — a repeated
+    query or an unchanged chunk doesn't cost an API call.
+
     Raises:
         EmbeddingError: if `text` is empty/whitespace-only, or the API
             call fails (auth, rate limit, timeout, etc.).
@@ -71,13 +75,19 @@ def embed_text(text: str) -> list[float]:
     if not text or not text.strip():
         raise EmbeddingError("Cannot embed empty or whitespace-only text.")
 
+    cached = embedding_cache.get_many(EMBEDDING_MODEL, [text])
+    if text in cached:
+        return cached[text]
+
     client = _get_client()
     try:
         response = client.embeddings.create(input=text, model=EMBEDDING_MODEL)
     except OpenAIError as e:
         raise EmbeddingError(f"OpenAI embedding call failed: {e}") from e
 
-    return response.data[0].embedding
+    vector = response.data[0].embedding
+    embedding_cache.put_many(EMBEDDING_MODEL, {text: vector})
+    return vector
 
 
 def embed_chunks(
@@ -85,50 +95,62 @@ def embed_chunks(
 ) -> list[EmbeddedChunk]:
     """Embed a list of chunks, returning them with their vectors attached.
 
+    Two cost-saving steps before any API call is made:
+    1. Cache lookup — chunks whose exact text was embedded before (under
+       the same model) are served from embedding_cache.py, no API call.
+    2. Real batching — remaining chunks are sent `batch_size` at a time
+       in ONE `client.embeddings.create(input=[...])` call per batch
+       (OpenAI's embeddings endpoint accepts a list and returns vectors
+       in the same order), not one call per chunk.
+
     Args:
         chunks: List of Chunk dicts from chunker.py.
-        batch_size: Number of chunks to send per API call (if the provider
-            supports batching). Ignored for local models if not applicable.
+        batch_size: Number of (cache-miss) chunks to send per API call.
 
     Returns:
         A list of EmbeddedChunk dicts (same fields as Chunk, plus `embedding`).
 
-    TODO:
-    - Split `chunks` into batches of `batch_size`.
-    - For each batch, extract the `text` field and call the provider's
-      batch embedding endpoint (falls back to embed_text() in a loop if
-      the provider has no batch API).
-    - Zip the returned vectors back onto the original chunks in order —
-      double check the provider preserves input order.
-    - Consider a retry/backoff wrapper for rate limits.
-    - Consider a progress callback/logging for large documents (many chunks).
-    - Raise EmbeddingError on failure; decide whether a partial failure
-      should abort the whole batch or return what succeeded.
+    Raises:
+        EmbeddingError: if a batch API call fails.
     """
-
-    if not chunks:  # if the list is empty, return an empty list of embeddings
+    if not chunks:
         return []
 
-    embedded_chunks: list[EmbeddedChunk] = []
-    for i in range(0, len(chunks), batch_size):  # finds the start of each batch
-        batch = chunks[i : i + batch_size]
-        texts = [chunk["text"] for chunk in batch]
-        embeddings = [embed_text(text) for text in texts]
+    texts = [c["text"] for c in chunks]
+    vectors_by_text = embedding_cache.get_many(EMBEDDING_MODEL, texts)
 
-        embedded_chunks.extend(
-            {
-                "page_number": chunk["page_number"],
-                "text": chunk["text"],
-                "chunk_index": chunk["chunk_index"],
-                "embedding": embedding,
-            }
-            for chunk, embedding in zip(batch, embeddings)
+    # De-duplicate: if the same text appears in multiple chunks (or more
+    # than once in `texts`), only embed it once.
+    to_embed = sorted({t for t in texts if t not in vectors_by_text})
+
+    client = _get_client()
+    for i in range(0, len(to_embed), batch_size):
+        batch_texts = to_embed[i : i + batch_size]
+        try:
+            response = client.embeddings.create(input=batch_texts, model=EMBEDDING_MODEL)
+        except OpenAIError as e:
+            raise EmbeddingError(
+                f"OpenAI batch embedding call failed on batch {i // batch_size}: {e}"
+            ) from e
+
+        new_vectors = {
+            text: item.embedding for text, item in zip(batch_texts, response.data)
+        }
+        embedding_cache.put_many(EMBEDDING_MODEL, new_vectors)
+        vectors_by_text.update(new_vectors)
+
+        done = min(i + batch_size, len(to_embed))
+        print(f"Embedded {done}/{len(to_embed)} new chunks ({len(texts) - len(to_embed)} served from cache)")
+
+    return [
+        EmbeddedChunk(
+            page_number=c["page_number"],
+            text=c["text"],
+            chunk_index=c["chunk_index"],
+            embedding=vectors_by_text[c["text"]],
         )
-
-        progress = (i + len(batch)) / len(chunks) * 100
-        print(f"Progress: {progress:.2f}% ({i + len(batch)}/{len(chunks)})")
-
-    return embedded_chunks
+        for c in chunks
+    ]
 
 
 def embed_query(query: str) -> list[float]:
@@ -137,10 +159,9 @@ def embed_query(query: str) -> list[float]:
     IMPORTANT: Must use the same model as embed_text/embed_chunks, or
     similarity scores will be meaningless.
 
-    TODO:
-    - Thin wrapper around embed_text(query) — some providers distinguish
-      between "document" and "query" embedding modes (e.g. asymmetric
-      embedding models); if so, use the query-specific mode here.
+    text-embedding-3-small is symmetric (no separate query/document mode),
+    so this is a thin wrapper around embed_text(). If the model were ever
+    swapped for an asymmetric one, the query-specific mode would go here.
     """
     return embed_text(query)
    
@@ -148,9 +169,7 @@ def embed_query(query: str) -> list[float]:
 def get_embedding_dimensions() -> int:
     """Return the dimensionality of vectors produced by this module.
 
-    TODO:
-    - Return the constant for the chosen model (e.g. EMBEDDING_DIMENSIONS).
-    - Useful for stage 4 (vector storage) to validate/initialize the DB
-      schema/index without embedding a throwaway string.
+    Used by stage 4 (vector storage) to validate/initialize the DB
+    schema/index without embedding a throwaway string.
     """
     return EMBEDDING_DIMENSIONS

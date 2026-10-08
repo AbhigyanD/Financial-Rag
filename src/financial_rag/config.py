@@ -50,6 +50,17 @@ class Settings:
     embedding_dimensions: int = field(
         default_factory=lambda: int(os.environ.get("EMBEDDING_DIMENSIONS", "1536"))
     )
+    embedding_cache_dir: str = field(
+        default_factory=lambda: os.environ.get("EMBEDDING_CACHE_DIR", "./embedding_cache")
+    )
+
+    # --- Stage 2: chunking ---
+    chunk_max_size: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNK_MAX_SIZE", "1000"))
+    )
+    chunk_overlap: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNK_OVERLAP", "100"))
+    )
 
     # --- Stage 4: storage ---
     persist_directory: str = field(
@@ -59,12 +70,39 @@ class Settings:
         default_factory=lambda: os.environ.get("COLLECTION_NAME", "financial_documents")
     )
 
-    # --- Stage 6: LLM ---
+    # --- Stage 5: retrieval ---
+    # Hybrid search (vector + BM25 merged by reciprocal rank fusion) and a
+    # reranking pass are both off by default — pure vector search is the
+    # tested, default-safe path; see retrieval.py for what each flag does.
+    hybrid_retrieval: bool = field(
+        default_factory=lambda: os.environ.get("HYBRID_RETRIEVAL", "false").lower() == "true"
+    )
+    rerank: bool = field(
+        default_factory=lambda: os.environ.get("RERANK", "false").lower() == "true"
+    )
+    # Below this similarity, retrieve() treats the result as "no real match"
+    # and generation abstains without calling the LLM — see llm.py::generate_answer.
+    similarity_threshold: float = field(
+        default_factory=lambda: float(os.environ.get("SIMILARITY_THRESHOLD", "0.3"))
+    )
+
+    # --- Stage 6: LLM / prompt builder ---
     claude_model: str = field(
         default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-5")
     )
     claude_max_tokens: int = field(
         default_factory=lambda: int(os.environ.get("CLAUDE_MAX_TOKENS", "1024"))
+    )
+    # Token budget for the CONTEXT portion of the prompt (excerpts), not the
+    # whole request. Chunks are dropped (lowest-similarity first) until the
+    # remaining context fits. See prompt_builder.py.
+    context_token_budget: int = field(
+        default_factory=lambda: int(os.environ.get("CONTEXT_TOKEN_BUDGET", "4000"))
+    )
+
+    # --- Stage 7/8: API, logging, cost ---
+    request_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "60"))
     )
 
     # --- Stage 7: API ---
