@@ -210,6 +210,38 @@ def delete_source(source: str) -> int:
     return len(matching_ids)
 
 
+def get_all_chunks(source: str | None = None) -> list[dict]:
+    """Return every stored chunk's text + metadata (no embeddings).
+
+    Chroma has no native keyword/BM25 index — retrieval.py's hybrid
+    search builds one from this at query time. Fine at prototype scale
+    (hundreds to a few thousand chunks); a production deployment would
+    maintain a persisted/incremental BM25 index instead of rebuilding
+    one from a full collection scan on every hybrid query.
+    """
+    collection = _get_collection()
+    where = {"source": source} if source is not None else None
+    try:
+        result = collection.get(where=where)
+    except ChromaError as e:
+        raise StorageError(f"Failed to fetch chunks for keyword index: {e}") from e
+
+    ids = result["ids"] or []
+    documents = result["documents"] or []
+    metadatas = result["metadatas"] or []
+
+    return [
+        {
+            "id": id_,
+            "text": document,
+            "page_number": metadata["page_number"],
+            "chunk_index": metadata["chunk_index"],
+            "source": metadata["source"],
+        }
+        for id_, document, metadata in zip(ids, documents, metadatas)
+    ]
+
+
 def count_stored_chunks() -> int:
     """Return the total number of chunks currently in the vector store.
 

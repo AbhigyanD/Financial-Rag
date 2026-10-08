@@ -18,6 +18,8 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "streamlit>=1.63.0",
     "requests>=2.34.2",
+    "rank-bm25>=0.2.2",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]
