@@ -9,3 +9,4 @@ chroma_data/
 embedding_cache/
 eval/.chroma_eval/
 eval/.build/
+model_cache/

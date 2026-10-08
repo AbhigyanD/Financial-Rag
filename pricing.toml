@@ -20,5 +20,13 @@ output_per_mtok = 10.00
 input_per_mtok = 0.10
 output_per_mtok = 0.50
 
+# Groq models (default LLM_PROVIDER) are deliberately absent: prices could not
+# be verified, and the free tier costs $0. Their cost is logged as null
+# (unknown). Add a [llm."<GROQ_MODEL>"] entry if you move to a paid plan.
+
+# Local embeddings run on your CPU: no per-token API cost.
+[embedding."sentence-transformers/all-MiniLM-L6-v2"]
+input_per_mtok = 0.0
+
 [embedding."text-embedding-3-small"]
 input_per_mtok = 0.02

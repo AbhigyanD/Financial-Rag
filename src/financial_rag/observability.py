@@ -113,7 +113,7 @@ def estimate_cost_usd(tokens: dict[str, int]) -> dict[str, float | None]:
     """Cost estimate per component. None means the model has no price in
     pricing.toml — reported as unknown rather than silently as $0."""
     prices = _prices()
-    llm = prices.get("llm", {}).get(settings.claude_model)
+    llm = prices.get("llm", {}).get(settings.llm_model)
     emb = prices.get("embedding", {}).get(settings.embedding_model)
 
     llm_cost = None
@@ -143,7 +143,8 @@ def finish(trace: Trace, status: int, **fields) -> dict:
         "tokens": trace.tokens,
         "est_cost_usd": estimate_cost_usd(trace.tokens),
         "cost_is_estimate": True,
-        "llm_model": settings.claude_model,
+        "llm_model": settings.llm_model,
+        "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         **trace.extra,
         **fields,

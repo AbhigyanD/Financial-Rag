@@ -25,6 +25,12 @@ def _isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr("financial_rag.embedding_cache._cache_path", lambda: db_path)
 
 
+@pytest.fixture(autouse=True)
+def _openai_provider(monkeypatch):
+    """These tests exercise batching against a fake OpenAI client."""
+    monkeypatch.setattr(E, "EMBEDDING_PROVIDER", "openai")
+
+
 def _fake_client(vector_len: int = 3) -> MagicMock:
     def fake_create(input, model):
         texts = input if isinstance(input, list) else [input]
@@ -119,3 +125,46 @@ def test_embed_text_empty_string_raises_without_calling_api():
             E.embed_text("   ")
 
     client.embeddings.create.assert_not_called()
+
+
+# --- local provider (fastembed) — model faked so no download happens --------
+
+
+class _FakeLocalModel:
+    def __init__(self):
+        self.calls: list[list[str]] = []
+
+    def embed(self, texts):
+        import numpy as np
+
+        self.calls.append(list(texts))
+        return [np.array([float(len(t)), 1.0]) for t in texts]
+
+
+def test_local_provider_embeds_without_any_api_client(monkeypatch):
+    monkeypatch.setattr(E, "EMBEDDING_PROVIDER", "local")
+    model = _FakeLocalModel()
+    monkeypatch.setattr(E, "_get_local_model", lambda: model)
+    monkeypatch.setattr(E, "_get_client", lambda: pytest.fail("OpenAI client must not be created"))
+
+    result = E.embed_chunks(_chunks("ab", "abcd"))
+
+    assert [c["embedding"] for c in result] == [[2.0, 1.0], [4.0, 1.0]]  # plain lists, not numpy
+    assert model.calls == [["ab", "abcd"]]
+
+
+def test_local_provider_uses_the_cache_too(monkeypatch):
+    monkeypatch.setattr(E, "EMBEDDING_PROVIDER", "local")
+    model = _FakeLocalModel()
+    monkeypatch.setattr(E, "_get_local_model", lambda: model)
+
+    E.embed_text("revenue?")
+    E.embed_text("revenue?")
+
+    assert model.calls == [["revenue?"]]
+
+
+def test_unknown_provider_is_a_clear_error(monkeypatch):
+    monkeypatch.setattr(E, "EMBEDDING_PROVIDER", "bogus")
+    with pytest.raises(E.EmbeddingError, match="EMBEDDING_PROVIDER"):
+        E.embed_text("x")

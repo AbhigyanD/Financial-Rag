@@ -35,6 +35,17 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+_DEFAULT_EMBEDDING_MODELS = {
+    "local": "sentence-transformers/all-MiniLM-L6-v2",
+    "openai": "text-embedding-3-small",
+}
+
+
+def _default_embedding_model() -> str:
+    provider = os.environ.get("EMBEDDING_PROVIDER", "local").lower()
+    return os.environ.get("EMBEDDING_MODEL", _DEFAULT_EMBEDDING_MODELS.get(provider, ""))
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- API keys (leave unset here; read fresh from the environment by
@@ -45,13 +56,18 @@ class Settings:
     anthropic_api_key: str | None = field(
         default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY")
     )
+    groq_api_key: str | None = field(default_factory=lambda: os.environ.get("GROQ_API_KEY"))
 
     # --- Stage 3: embeddings ---
-    embedding_model: str = field(
-        default_factory=lambda: os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+    # "local" runs a small model on CPU via fastembed (free, no key);
+    # "openai" calls the OpenAI embeddings API (needs OPENAI_API_KEY).
+    embedding_provider: str = field(
+        default_factory=lambda: os.environ.get("EMBEDDING_PROVIDER", "local").lower()
     )
-    embedding_dimensions: int = field(
-        default_factory=lambda: int(os.environ.get("EMBEDDING_DIMENSIONS", "1536"))
+    embedding_model: str = field(default_factory=lambda: _default_embedding_model())
+    # Where fastembed keeps downloaded model files (local provider only).
+    model_cache_dir: str = field(
+        default_factory=lambda: os.environ.get("MODEL_CACHE_DIR", "./model_cache")
     )
     embedding_cache_dir: str = field(
         default_factory=lambda: os.environ.get("EMBEDDING_CACHE_DIR", "./embedding_cache")
@@ -83,20 +99,33 @@ class Settings:
     rerank: bool = field(
         default_factory=lambda: os.environ.get("RERANK", "false").lower() == "true"
     )
-    # Below this similarity, retrieve() treats the result as "no real match"
-    # and generation abstains without calling the LLM — see llm.py::generate_answer.
+    # If no retrieved chunk reaches this similarity, generation abstains
+    # without calling the LLM (llm.retrieval_is_weak). Similarity is
+    # (1 + cosine) / 2. 0.62 was set from a measurement with the default
+    # local MiniLM model on the eval corpus: answerable questions scored
+    # 0.697-0.878, off-topic questions 0.506-0.560. On-topic questions with
+    # no answer overlapped the answerable range (0.747-0.850), so this gate
+    # only catches off-topic questions; gate 2 handles the rest. Re-measure
+    # if the embedding model or corpus changes.
     similarity_threshold: float = field(
-        default_factory=lambda: float(os.environ.get("SIMILARITY_THRESHOLD", "0.3"))
+        default_factory=lambda: float(os.environ.get("SIMILARITY_THRESHOLD", "0.62"))
     )
 
     # --- Stage 6: LLM / prompt builder ---
+    # "groq" (default; OpenAI-compatible API, has a free tier) or "anthropic".
+    llm_provider: str = field(
+        default_factory=lambda: os.environ.get("LLM_PROVIDER", "groq").lower()
+    )
+    groq_model: str = field(
+        default_factory=lambda: os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    )
     claude_model: str = field(
         default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-5")
     )
-    # On claude-opus-5 thinking is on by default and its tokens count
-    # against max_tokens, so a small cap can cut an answer off mid-way.
-    claude_max_tokens: int = field(
-        default_factory=lambda: int(os.environ.get("CLAUDE_MAX_TOKENS", "4096"))
+    # Output cap for either provider. On claude-opus-5 thinking is on by
+    # default and counts against it, so a small cap can cut an answer off.
+    llm_max_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("LLM_MAX_TOKENS", "4096"))
     )
     # Token budget for the CONTEXT portion of the prompt (excerpts), not the
     # whole request. Chunks are dropped (lowest-similarity first) until the
@@ -126,6 +155,11 @@ class Settings:
             "CORS_ORIGINS", ["http://localhost:3000", "http://localhost:8501"]
         )
     )
+
+    @property
+    def llm_model(self) -> str:
+        """The model actually used for generation, given llm_provider."""
+        return self.claude_model if self.llm_provider == "anthropic" else self.groq_model
 
 
 settings = Settings()

@@ -24,7 +24,7 @@ def pricing(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         O, "settings",
-        dataclasses.replace(O.settings, pricing_file=str(path), claude_model="test-llm", embedding_model="test-emb"),
+        dataclasses.replace(O.settings, pricing_file=str(path), llm_provider="groq", groq_model="test-llm", embedding_model="test-emb"),
     )
     O._prices.cache_clear()
     yield
@@ -70,7 +70,7 @@ def test_cost_estimate_uses_pricing_file(pricing):
 
 
 def test_unpriced_model_reports_unknown_not_zero(pricing, monkeypatch):
-    monkeypatch.setattr(O, "settings", dataclasses.replace(O.settings, claude_model="not-in-file"))
+    monkeypatch.setattr(O, "settings", dataclasses.replace(O.settings, groq_model="not-in-file"))
     cost = O.estimate_cost_usd({"llm_input": 100, "llm_output": 10, "embedding": 0})
     assert cost["llm"] is None
     assert cost["total"] is None

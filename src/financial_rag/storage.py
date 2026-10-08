@@ -34,7 +34,9 @@ import chromadb
 from chromadb.errors import ChromaError
 
 from financial_rag.config import settings
-from financial_rag.embeddings import EmbeddedChunk, get_embedding_dimensions
+import re
+
+from financial_rag.embeddings import EmbeddedChunk
 
 
 class StoredChunk(TypedDict):
@@ -51,13 +53,22 @@ class StorageError(Exception):
     """Raised when a vector store operation fails."""
 
 
-# TODO: pick a persistence location, e.g.:
-#   PERSIST_DIRECTORY = "./chroma_data"
-# Chroma will create/reuse this directory on disk so the index survives
-# across process restarts (no need to re-embed documents every run).
-# Configurable via PERSIST_DIRECTORY / COLLECTION_NAME in .env — see config.py.
 PERSIST_DIRECTORY = settings.persist_directory
-COLLECTION_NAME = settings.collection_name
+
+
+def _collection_name() -> str:
+    """COLLECTION_NAME plus the embedding model, e.g.
+    financial_documents-sentence-transformers-all-MiniLM-L6-v2.
+
+    Vectors from different models (or dimensions) can't be compared, so
+    switching EMBEDDING_MODEL starts a fresh collection instead of
+    failing on a dimension mismatch or silently mixing incompatible vectors.
+    """
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", settings.embedding_model).strip("-._")
+    return f"{settings.collection_name}-{slug}"[:512]
+
+
+COLLECTION_NAME = _collection_name()
 
 
 @lru_cache(maxsize=1)
@@ -259,3 +270,19 @@ def count_stored_chunks() -> int:
         return collection.count()
     except ChromaError as e:
         raise StorageError(f"Failed to count stored chunks: {e}") from e
+
+
+def list_sources() -> list[dict]:
+    """One row per stored document: name, chunk count, highest page seen."""
+    collection = _get_collection()
+    try:
+        metadatas = collection.get(include=["metadatas"])["metadatas"] or []
+    except ChromaError as e:
+        raise StorageError(f"Failed to list documents: {e}") from e
+
+    by_source: dict[str, dict] = {}
+    for m in metadatas:
+        row = by_source.setdefault(m["source"], {"source": m["source"], "chunks": 0, "pages": 0})
+        row["chunks"] += 1
+        row["pages"] = max(row["pages"], m["page_number"])
+    return sorted(by_source.values(), key=lambda r: r["source"].lower())
