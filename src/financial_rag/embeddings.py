@@ -59,7 +59,7 @@ def _get_client() -> OpenAI:
             "OPENAI_API_KEY is not set. Add it to a .env file or export it "
             "in your environment before calling embed_text/embed_chunks."
         )
-    return OpenAI()
+    return OpenAI(timeout=settings.request_timeout_seconds)
 
 
 def embed_text(text: str) -> list[float]:

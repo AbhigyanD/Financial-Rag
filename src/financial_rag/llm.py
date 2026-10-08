@@ -1,46 +1,32 @@
-"""Generate a cited answer to a user's query from retrieved chunks.
+"""Generate a cited answer to a question from retrieved chunks, or abstain.
 
-This is stage 6 of the pipeline: given a query and the chunks retrieved
-for it (stage 5), build a prompt that grounds Claude in only that context
-and asks it to answer with page citations, then call the Messages API.
+Why: this is the only module that calls Claude, so it is where the two
+abstention gates live — before the call (retrieval too weak to be worth
+asking) and after it (the model found no support, or cited nothing real).
 
-Design notes:
-- The prompt instructs Claude to answer ONLY from the provided context and
-  to say so explicitly when the context doesn't contain the answer —
-  this is what keeps a RAG system from hallucinating financial figures.
-- Each chunk is labeled with its source/page in the prompt so Claude can
-  cite "[source, page N]" inline, and so a UI can cross-check citations
-  against the actual RetrievedChunk objects afterward.
-- Model is fixed at module level for consistency; swap here if needed.
+Flow: retrieval_is_weak? -> abstain without an API call.
+      else build_prompt -> Claude -> finalize_answer:
+        model replied with the abstain sentence and no valid citation -> abstain
+        no valid citation at all                                      -> abstain
+        otherwise -> answer with only validated citations
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Generator, Iterator, TypedDict
+from typing import Generator, Iterator, Literal, TypedDict, Union
 
 import anthropic
 
+from financial_rag.citations import Citation, validate_citations
 from financial_rag.config import settings
+from financial_rag.prompt_builder import ABSTAIN_TEXT, BuiltPrompt, build_prompt
 from financial_rag.retrieval import RetrievedChunk
 
-# Configurable via CLAUDE_MODEL / CLAUDE_MAX_TOKENS in .env — see config.py.
 MODEL = settings.claude_model
 MAX_TOKENS = settings.claude_max_tokens
 
-SYSTEM_PROMPT = """\
-You are a financial research assistant. Answer the user's question using \
-ONLY the excerpts provided in the context below — do not use outside \
-knowledge, and do not guess or extrapolate beyond what the context states.
-
-Rules:
-- Cite every claim inline using the format [source, page N], where source \
-and page come from the excerpt you're drawing from.
-- If the context does not contain enough information to answer the \
-question, say so explicitly instead of guessing.
-- Be concise and precise — this is financial information; do not round, \
-approximate, or restate figures inaccurately.
-"""
+AbstainReason = Literal["weak_retrieval", "model_found_no_support", "no_valid_citations"]
 
 
 class LLMError(Exception):
@@ -48,136 +34,146 @@ class LLMError(Exception):
 
 
 class Answer(TypedDict):
-    """The generated answer plus the chunks it was grounded in."""
-
     text: str
-    citations: list[RetrievedChunk]  # the chunks passed as context, for UI cross-checking
+    citations: list[Citation]  # only citations validated against the sent chunks
+    abstained: bool
+    abstain_reason: AbstainReason | None
+    invalid_citation_ids: list[int]  # [n] markers the model wrote that matched nothing
+    input_tokens: int  # from the API's usage field; 0 if no call was made
+    output_tokens: int
+
+
+StreamEvent = Union[tuple[Literal["delta"], str], tuple[Literal["final"], Answer]]
 
 
 def _get_client() -> anthropic.Anthropic:
-    """Create the Anthropic client. Resolves ANTHROPIC_API_KEY from the
-    environment automatically; raises a clear error if no credentials are
-    configured at all.
-    """
-    try:
-        return anthropic.Anthropic()
-    except Exception as e:
-        raise LLMError(f"Failed to create Anthropic client: {e}") from e
+    if not settings.anthropic_api_key:
+        raise LLMError("ANTHROPIC_API_KEY is not set. Add it to .env or the environment.")
+    return anthropic.Anthropic(timeout=settings.request_timeout_seconds)
 
 
 @contextmanager
 def _translate_anthropic_errors() -> Generator[None]:
-    """Convert the anthropic SDK's typed exceptions into LLMError.
-
-    Shared by generate_answer() and generate_answer_stream() so the same
-    most-specific-first exception chain isn't duplicated between the
-    non-streaming and streaming call paths.
-    """
     try:
         yield
-    except anthropic.BadRequestError as e:
-        raise LLMError(f"Bad request to Claude API: {e.message}") from e
     except anthropic.AuthenticationError as e:
         raise LLMError("Invalid or missing ANTHROPIC_API_KEY.") from e
-    except anthropic.PermissionDeniedError as e:
-        raise LLMError("API key lacks permission for this request.") from e
     except anthropic.NotFoundError as e:
         raise LLMError(f"Invalid model or endpoint: {MODEL}") from e
     except anthropic.RateLimitError as e:
         retry_after = e.response.headers.get("retry-after", "unknown")
         raise LLMError(f"Rate limited by Claude API. Retry after {retry_after}s.") from e
+    except anthropic.APITimeoutError as e:
+        raise LLMError(f"Claude API timed out after {settings.request_timeout_seconds}s.") from e
     except anthropic.APIStatusError as e:
         raise LLMError(f"Claude API error ({e.status_code}): {e.message}") from e
     except anthropic.APIConnectionError as e:
         raise LLMError("Network error connecting to Claude API.") from e
 
 
-def build_context(chunks: list[RetrievedChunk]) -> str:
-    """Format retrieved chunks into a labeled context block for the prompt.
+def retrieval_is_weak(chunks: list[RetrievedChunk]) -> bool:
+    """True if no chunk clears the similarity threshold.
 
-    Each chunk is tagged with its source filename and page number so
-    Claude can cite it, e.g.:
-
-        [Excerpt 1 — quarterly_report.pdf, page 4]
-        Revenue grew 20% year-over-year...
+    Uses vector_similarity (real cosine, rescaled to [0, 1]) rather than
+    `similarity`, which holds an RRF score in hybrid mode.
     """
     if not chunks:
-        return "(No relevant context was found for this query.)"
+        return True
+    best = max(c.get("vector_similarity", c["similarity"]) for c in chunks)
+    return best < settings.similarity_threshold
 
-    blocks = []
-    for i, chunk in enumerate(chunks, start=1):
-        header = f"[Excerpt {i} — {chunk['source']}, page {chunk['page_number']}]"
-        blocks.append(f"{header}\n{chunk['text']}")
-    return "\n\n".join(blocks)
+
+def _abstain(reason: AbstainReason, invalid_ids=None, input_tokens=0, output_tokens=0) -> Answer:
+    return Answer(
+        text=ABSTAIN_TEXT,
+        citations=[],
+        abstained=True,
+        abstain_reason=reason,
+        invalid_citation_ids=invalid_ids or [],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def finalize_answer(
+    raw_text: str, prompt: BuiltPrompt, input_tokens: int = 0, output_tokens: int = 0
+) -> Answer:
+    """Turn the model's raw text into an Answer, applying the post-call gates."""
+    check = validate_citations(raw_text, prompt.chunks)
+    usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+
+    if not check.citations:
+        said_not_found = ABSTAIN_TEXT.lower().rstrip(".") in raw_text.lower()
+        reason = "model_found_no_support" if said_not_found else "no_valid_citations"
+        return _abstain(reason, check.invalid_ids, **usage)
+
+    return Answer(
+        text=check.text,
+        citations=check.citations,
+        abstained=False,
+        abstain_reason=None,
+        invalid_citation_ids=check.invalid_ids,
+        **usage,
+    )
+
+
+def _request(prompt: BuiltPrompt) -> dict:
+    return {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "system": prompt.system,
+        "messages": [{"role": "user", "content": prompt.user}],
+    }
 
 
 def generate_answer(query: str, chunks: list[RetrievedChunk]) -> Answer:
-    """Generate a cited answer to `query`, grounded in `chunks`.
+    if retrieval_is_weak(chunks):
+        return _abstain("weak_retrieval")
 
-    Args:
-        query: The user's natural-language question.
-        chunks: RetrievedChunk list from retrieval.retrieve(), ordered by
-            relevance. May be empty — Claude will be told no context was
-            found and should say so rather than answer from general
-            knowledge.
-
-    Returns:
-        An Answer dict with the generated text and the chunks used as
-        context (for a UI to cross-reference citations against).
-
-    Raises:
-        LLMError: if the API call fails for any reason.
-    """
-    context = build_context(chunks)
-    user_message = f"Context:\n\n{context}\n\nQuestion: {query}"
-
+    prompt = build_prompt(query, chunks)
     client = _get_client()
     with _translate_anthropic_errors():
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
+        response = client.messages.create(**_request(prompt))
 
     if response.stop_reason == "refusal":
         raise LLMError("Claude declined to answer this query.")
 
-    answer_text = next(
-        (block.text for block in response.content if block.type == "text"), ""
+    text = "".join(block.text for block in response.content if block.type == "text")
+    return finalize_answer(
+        text, prompt, response.usage.input_tokens, response.usage.output_tokens
     )
 
-    return Answer(text=answer_text, citations=chunks)
 
+def generate_answer_stream(query: str, chunks: list[RetrievedChunk]) -> Iterator[StreamEvent]:
+    """Yield ("delta", text) fragments as they arrive, then one ("final", Answer).
 
-def generate_answer_stream(
-    query: str, chunks: list[RetrievedChunk]
-) -> Iterator[str]:
-    """Like generate_answer(), but yields the answer text incrementally.
-
-    Yields plain text fragments as Claude generates them, for a chat UI
-    that wants to render the response token-by-token instead of waiting
-    for the full answer. Citations aren't yielded here — the caller
-    already has `chunks` (the same list passed in) to display alongside
-    the streamed text once it completes.
-
-    Raises:
-        LLMError: if the API call fails, including mid-stream (e.g. a
-            connection drop) or if Claude refuses the query.
+    Deltas are raw model output; the final Answer is the validated version
+    (invalid citations stripped, or replaced by an abstention). A client
+    should replace what it rendered from deltas with final["text"].
     """
-    context = build_context(chunks)
-    user_message = f"Context:\n\n{context}\n\nQuestion: {query}"
+    if retrieval_is_weak(chunks):
+        yield ("final", _abstain("weak_retrieval"))
+        return
 
+    prompt = build_prompt(query, chunks)
     client = _get_client()
+    parts: list[str] = []
     with _translate_anthropic_errors():
-        with client.messages.stream(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        ) as stream:
-            yield from stream.text_stream
+        with client.messages.stream(**_request(prompt)) as stream:
+            for text in stream.text_stream:
+                parts.append(text)
+                yield ("delta", text)
             final_message = stream.get_final_message()
 
     if final_message.stop_reason == "refusal":
         raise LLMError("Claude declined to answer this query.")
+
+    yield (
+        "final",
+        finalize_answer(
+            "".join(parts),
+            prompt,
+            final_message.usage.input_tokens,
+            final_message.usage.output_tokens,
+        ),
+    )

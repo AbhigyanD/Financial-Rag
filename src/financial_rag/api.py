@@ -1,65 +1,129 @@
-"""FastAPI interface for the Financial RAG pipeline.
+"""FastAPI layer over the pipeline: /health, /ingest, /query, /query/stream.
 
-This is stage 7: exposes the full pipeline (stages 1-6) over HTTP so a
-frontend (or curl/Postman) can upload documents and ask questions.
+Why: transport concerns — request IDs, timeouts, upload limits, one error
+shape — live here so the pipeline modules stay plain, testable functions.
 
-Endpoints:
-    POST /documents        Upload a PDF/TXT file — runs stages 1-4
-                            (load -> chunk -> embed -> store).
-    DELETE /documents/{source}  Remove a previously ingested document.
-    GET  /documents/count  Total chunks currently indexed.
-    POST /query             Ask a question — runs stages 5-6
-                            (retrieve -> generate answer with citations).
-    GET  /health            Liveness check.
-
-Request/response shapes live in schemas.py; exception-to-HTTP-status
-mapping lives in errors.py — this file is just route wiring.
-
-Run locally with:
+Run locally:
     uv run uvicorn financial_rag.api:app --reload
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
+import uuid
 from typing import Iterator
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from financial_rag.config import settings
 from financial_rag.embeddings import EmbeddingError, embed_chunks
 from financial_rag.errors import translate_errors
-from financial_rag.llm import LLMError, generate_answer, generate_answer_stream
+from financial_rag.llm import Answer, LLMError, generate_answer, generate_answer_stream
 from financial_rag.loaders.chunker import chunk_pages
 from financial_rag.loaders.document_loader import DocumentLoadError, load_document
-from financial_rag.retrieval import RetrievalError, RetrievedChunk, retrieve
+from financial_rag.retrieval import RetrievalError, retrieve
 from financial_rag.schemas import (
-    CitationResponse,
     CountResponse,
     DeleteResponse,
+    ErrorResponse,
     IngestResponse,
     QueryRequest,
     QueryResponse,
 )
-from financial_rag.storage import StorageError, count_stored_chunks, delete_source, store_chunks
+from financial_rag.storage import (
+    StorageError,
+    count_stored_chunks,
+    delete_source,
+    store_chunks,
+)
 
 app = FastAPI(
     title="Financial RAG",
-    description="Retrieval-augmented Q&A over financial documents.",
+    description="Retrieval-augmented Q&A over financial documents, with validated citations.",
+    responses={400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}, 504: {"model": ErrorResponse}},
 )
 
-# Allows a browser-based frontend (e.g. a Streamlit/React app on a
-# different origin) to call this API. Configure allowed origins via
-# CORS_ORIGINS in .env — defaults to common local dev ports.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
+
+# A client-supplied X-Request-ID is reused only if it looks like an id, so
+# arbitrary header text never ends up in logs or response headers.
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+# --- request IDs and error shape ------------------------------------------
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if _SAFE_REQUEST_ID.match(incoming) else uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", "unknown")
+
+
+def _error(request: Request, status: int, message: str) -> JSONResponse:
+    request_id = _request_id(request)
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"status": status, "message": message, "request_id": request_id}},
+        headers={"X-Request-ID": request_id},
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
+    return _error(request, exc.status_code, str(exc.detail))
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    problems = "; ".join(
+        f"{'.'.join(str(p) for p in e['loc'] if p != 'body')}: {e['msg']}" for e in exc.errors()
+    )
+    return _error(request, 422, f"Invalid request — {problems}")
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    # Details stay server-side; the client gets the request ID to report.
+    return _error(request, 500, "Internal error. Quote the request_id when reporting this.")
+
+
+async def _with_timeout(fn, *args):
+    """Run blocking pipeline code off the event loop, bounded by a timeout.
+
+    Caveat: on timeout the client gets a 504 immediately, but the worker
+    thread can't be killed and finishes in the background. The SDK
+    clients carry the same timeout, which bounds how long that lasts.
+    """
+    try:
+        return await asyncio.wait_for(
+            run_in_threadpool(fn, *args), timeout=settings.request_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"Timed out after {settings.request_timeout_seconds:.0f}s.")
+
+
+# --- routes ------------------------------------------------------------------
 
 
 @app.get("/health")
@@ -67,112 +131,116 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/documents", response_model=IngestResponse)
-async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
-    """Upload a document and run it through stages 1-4 of the pipeline."""
-    filename = file.filename or "uploaded_file"
-    contents = await file.read()
-
+def _ingest(contents: bytes, filename: str) -> tuple[int, int, int]:
     with translate_errors(
         (DocumentLoadError, 400, "Failed to load document"),
         (EmbeddingError, 502, "Failed to embed document"),
         (StorageError, 500, "Failed to store document"),
     ):
         pages = load_document(contents, filename=filename)
+        empty_pages = sum(1 for p in pages if not p["text"].strip())
         chunks = chunk_pages(
             pages, max_chunk_size=settings.chunk_max_size, overlap=settings.chunk_overlap
         )
-        embedded_chunks = embed_chunks(chunks)
-        chunks_stored = store_chunks(embedded_chunks, source=filename)
+        if not chunks:
+            raise HTTPException(
+                422,
+                f"No extractable text in '{filename}' ({len(pages)} page(s)). "
+                "It may be a scanned PDF without an OCR text layer.",
+            )
+        embedded = embed_chunks(chunks)
+        # Replace, don't merge: if a re-uploaded version has fewer chunks,
+        # upsert alone would leave the old version's extra chunks behind.
+        # Embedding happens first so a failed embed never deletes good data.
+        delete_source(filename)
+        stored = store_chunks(embedded, source=filename)
+    return len(pages), empty_pages, stored
 
-    return IngestResponse(source=filename, pages=len(pages), chunks_stored=chunks_stored)
+
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest(request: Request, file: UploadFile = File(...)) -> IngestResponse:
+    """Upload a PDF/TXT: load -> chunk -> embed -> store."""
+    filename = file.filename or "uploaded_file"
+    max_bytes = int(settings.max_upload_mb * 1024 * 1024)
+    contents = await file.read(max_bytes + 1)
+    if len(contents) > max_bytes:
+        raise HTTPException(413, f"File exceeds the {settings.max_upload_mb:g} MB upload limit.")
+
+    pages, empty_pages, stored = await _with_timeout(_ingest, contents, filename)
+    return IngestResponse(
+        source=filename, pages=pages, empty_pages=empty_pages,
+        chunks_stored=stored, request_id=_request_id(request),
+    )
 
 
 @app.delete("/documents/{source}", response_model=DeleteResponse)
 def remove_document(source: str) -> DeleteResponse:
-    """Delete all chunks belonging to a previously ingested document."""
     with translate_errors((StorageError, 500, "Failed to delete document")):
-        chunks_deleted = delete_source(source)
-
-    return DeleteResponse(source=source, chunks_deleted=chunks_deleted)
+        deleted = delete_source(source)
+    return DeleteResponse(source=source, chunks_deleted=deleted)
 
 
 @app.get("/documents/count", response_model=CountResponse)
 def documents_count() -> CountResponse:
-    """Return the total number of chunks currently indexed."""
     with translate_errors((StorageError, 500, "Failed to count chunks")):
         total = count_stored_chunks()
-
     return CountResponse(total_chunks=total)
 
 
-def _citations_payload(chunks: list[RetrievedChunk]) -> list[dict]:
-    """Shared shape used by both /query and /query/stream for citations."""
-    return [
-        CitationResponse(
-            source=c["source"],
-            page_number=c["page_number"],
-            similarity=c["similarity"],
-            text=c["text"],
-        ).model_dump()
-        for c in chunks
-    ]
+def _to_response(answer: Answer, request_id: str) -> QueryResponse:
+    return QueryResponse(
+        answer=answer["text"],
+        abstained=answer["abstained"],
+        abstain_reason=answer["abstain_reason"],
+        citations=answer["citations"],
+        invalid_citation_ids=answer["invalid_citation_ids"],
+        request_id=request_id,
+    )
+
+
+def _retrieve(body: QueryRequest):
+    with translate_errors((RetrievalError, 502, "Retrieval failed")):
+        return retrieve(body.query, top_k=body.top_k, source=body.source)
+
+
+def _answer(body: QueryRequest) -> Answer:
+    chunks = _retrieve(body)
+    with translate_errors((LLMError, 502, "Answer generation failed")):
+        return generate_answer(body.query, chunks)
 
 
 @app.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest) -> QueryResponse:
-    """Ask a question and get a cited answer, running stages 5-6."""
-    if not request.query.strip():
-        raise HTTPException(status_code=400, detail="Query must not be empty.")
-
-    with translate_errors(
-        (RetrievalError, 502, "Retrieval failed"),
-        (LLMError, 502, "Answer generation failed"),
-    ):
-        chunks = retrieve(request.query, top_k=request.top_k, source=request.source)
-        answer = generate_answer(request.query, chunks)
-
-    return QueryResponse(answer=answer["text"], citations=_citations_payload(answer["citations"]))
+async def query(request: Request, body: QueryRequest) -> QueryResponse:
+    """Retrieve -> generate -> validate citations (or abstain)."""
+    answer = await _with_timeout(_answer, body)
+    return _to_response(answer, _request_id(request))
 
 
-def _sse_event(event: str, data) -> str:
-    """Format one Server-Sent Event line. `data` is JSON-encoded."""
+def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @app.post("/query/stream")
-def query_stream(request: QueryRequest) -> StreamingResponse:
-    """Like /query, but streams the answer as it's generated (SSE).
+async def query_stream(request: Request, body: QueryRequest) -> StreamingResponse:
+    """Like /query, streamed as Server-Sent Events.
 
-    Event sequence:
-        citations  — sent once, immediately after retrieval, as a JSON
-                     array of citation objects (same shape as /query).
-        delta      — sent repeatedly, each a JSON string of one text
-                     fragment; concatenate them in order to get the
-                     full answer.
-        error      — sent instead of further deltas if generation fails
-                     partway through; the stream ends after this.
-        done       — sent once, after the last delta (on success only).
+    Events: `delta` (raw text fragment, repeated) -> `final` (the full
+    QueryResponse, with validated citations — replaces the deltas), or
+    `error` if generation fails after the stream has started.
     """
-    if not request.query.strip():
-        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    # Retrieval runs before streaming starts, so its failures are normal
+    # HTTP errors rather than an error event inside a 200 response.
+    chunks = await _with_timeout(_retrieve, body)
+    request_id = _request_id(request)
 
-    # Retrieval happens before the streaming response starts, so a
-    # RetrievalError still becomes a normal HTTPException instead of an
-    # error event buried inside an already-started stream.
-    with translate_errors((RetrievalError, 502, "Retrieval failed")):
-        chunks = retrieve(request.query, top_k=request.top_k, source=request.source)
-
-    def event_stream() -> Iterator[str]:
-        yield _sse_event("citations", _citations_payload(chunks))
+    def events() -> Iterator[str]:
         try:
-            for delta in generate_answer_stream(request.query, chunks):
-                yield _sse_event("delta", delta)
+            for kind, payload in generate_answer_stream(body.query, chunks):
+                if kind == "delta":
+                    yield _sse("delta", payload)
+                else:
+                    yield _sse("final", _to_response(payload, request_id).model_dump())
         except LLMError as e:
-            # The HTTP response has already started (status 200 sent), so
-            # the failure has to travel as an SSE event, not an HTTPException.
-            yield _sse_event("error", str(e))
-            return
-        yield _sse_event("done", {})
+            yield _sse("error", {"message": str(e), "request_id": request_id})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(events(), media_type="text/event-stream")

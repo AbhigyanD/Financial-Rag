@@ -104,6 +104,10 @@ class Settings:
     request_timeout_seconds: float = field(
         default_factory=lambda: float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "60"))
     )
+    # Uploads above this are rejected with 413 before any parsing or embedding.
+    max_upload_mb: float = field(
+        default_factory=lambda: float(os.environ.get("MAX_UPLOAD_MB", "25"))
+    )
 
     # --- Stage 7: API ---
     # Comma-separated list, e.g. "http://localhost:3000,https://myapp.vercel.app".
